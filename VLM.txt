@@ -1,5 +1,55 @@
+# 1. INSTALLING VLM DEPENDENCIES
+
 # Navigate to your project directory
 cd /workspace/VLM_Inferred_HRI_safety
 
 # Install required packages (use Isaac Sim's Python environment)
 /workspace/isaaclab/_isaac_sim/python.sh -m pip install transformers accelerate pillow torch torchvision
+
+-----
+# 2. TESTING COMMANDS
+
+# Test on a single image (quick test)
+cd /workspace/VLM_Inferred_HRI_safety
+/workspace/isaaclab/_isaac_sim/python.sh scripts/test_vlm.py \
+    --single_image ./camera_output/frame_000030.png
+
+# OR batch process multiple images (5 images for testing)
+/workspace/isaaclab/_isaac_sim/python.sh scripts/test_vlm.py \
+    --image_dir ./camera_output \
+    --output ./vlm_test_results.json \
+    --max_images 5
+
+# OR process ALL images (if you want full batch)
+/workspace/isaaclab/_isaac_sim/python.sh scripts/test_vlm.py \
+    --image_dir ./camera_output \
+    --output ./vlm_test_results.json \
+    --max_images 999
+
+------
+-> Sample Output from testing single image :
+
+SmolVLM-500M-Instruct Test Script
+============================================================
+[VLM] Initializing HuggingFaceTB/SmolVLM-500M-Instruct...
+[VLM] Using device: cuda
+/workspace/isaaclab/_isaac_sim/kit/python/lib/python3.11/site-packages/transformers/models/auto/modeling_auto.py:2284: FutureWarning: The class `AutoModelForVision2Seq` is deprecated and will be removed in v5.0. Please use `AutoModelForImageTextToText` instead.
+  warnings.warn(
+`torch_dtype` is deprecated! Use `dtype` instead!
+[VLM] Model loaded successfully!
+[VLM] GPU memory allocated: 1.02 GB
+
+[TEST] Processing single image: /workspace/camera_output/frame_000030.png
+
+[VLM] Processed: frame_000030.png
+[VLM] Time: 2.296s
+[VLM] Response: The robot arm is positioned with the tool/saw in a locked position. There are no visible motion or i...
+
+============================================================
+RESULT:
+============================================================
+Image: /workspace/camera_output/frame_000030.png
+Time: 2.296s
+Response:
+The robot arm is positioned with the tool/saw in a locked position. There are no visible motion or interaction.
+============================================================
