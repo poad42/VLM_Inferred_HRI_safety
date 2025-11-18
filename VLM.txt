@@ -1,0 +1,5 @@
+# Navigate to your project directory
+cd /workspace/VLM_Inferred_HRI_safety
+
+# Install required packages (use Isaac Sim's Python environment)
+/workspace/isaaclab/_isaac_sim/python.sh -m pip install transformers accelerate pillow torch torchvision

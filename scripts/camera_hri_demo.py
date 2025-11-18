@@ -4,6 +4,11 @@ It successfully controls the Franka arm's end-effector with an OSC.
 
 -- MODIFIED VERSION (v13 - Camera Added) --
 This script adds minimal camera functionality to capture RGB frames.
+
+Command to run this script simulation : 
+1) cd /workspace
+2) /workspace/isaaclab/isaaclab.sh -p /workspace/VLM_Inferred_HRI_safety/scripts/camera_hri_demo.py --livestream 2 --enable_cameras
+
 """
 
 import argparse
