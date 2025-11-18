@@ -1,7 +1,9 @@
-#!/usr/bin/env python3
 """
-Camera + VLM Demo Script for HRI Safety Project
-Extends the original HRI demo with camera capture and VLM scene description
+This is the final, working baseline script for Isaac Lab v2.3.0.
+It successfully controls the Franka arm's end-effector with an OSC.
+
+-- MODIFIED VERSION (v13 - Camera Added) --
+This script adds minimal camera functionality to capture RGB frames.
 """
 
 import argparse
@@ -11,24 +13,22 @@ import torch
 import numpy as np
 from PIL import Image
 import os
-import time
 
-# Parse arguments
-parser = argparse.ArgumentParser(description="HRI Demo with Camera and VLM Integration")
+# Boilerplate
+parser = argparse.ArgumentParser(description="A working baseline for the Operational Space Controller.")
 parser.add_argument("--num_envs", type=int, default=1, help="Number of environments to spawn.")
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
 
-# Launch Isaac Sim
 app_launcher = AppLauncher(args_cli)
 simulation_app = app_launcher.app
 
-# Isaac Lab imports (after app launcher)
+# --- MOVED IMPORT TO TOP ---
 from isaaclab.sim import SimulationCfg, SimulationContext
 import isaaclab.sim as sim_utils
 from isaaclab.scene import InteractiveScene, InteractiveSceneCfg
 from isaaclab.assets import Articulation, ArticulationCfg, AssetBaseCfg, RigidObject, RigidObjectCfg
-from isaaclab.sensors import CameraCfg, Camera  # Camera imports
+from isaaclab.sensors import CameraCfg, Camera  # ADDED CAMERA BACK
 from isaaclab.controllers import OperationalSpaceController, OperationalSpaceControllerCfg
 from isaaclab.utils.math import matrix_from_quat, quat_inv, subtract_frame_transforms, quat_apply_inverse
 import carb.input
@@ -36,36 +36,47 @@ import omni.appwindow
 from pxr import Gf
 from isaaclab_assets import FRANKA_PANDA_HIGH_PD_CFG
 
-# Import attachment helper from original demo
+# --- NEW ATTACHMENT IMPORT (v11 FIX) ---
 import omni.physx.scripts.physicsUtils
 import omni.usd
+# --- END NEW IMPORTS ---
 
-# Global variables for keyboard control
-g_human_saw_velocity_cmd = torch.zeros(1, 6)
-SAW_VELOCITY = 0.5
+# --- KEYBOARD IMPL (MODIFIED) ---
+g_human_saw_velocity_cmd = torch.zeros(1, 6) # [vx, vy, vz, wx, wy, wz]
+SAW_VELOCITY = 0.5 # m/s
 
-# Attachment Helper Class (copied from original demo)
+# --- NEW ATTACHMENT HELPER CLASS (v12) ---
 class AttachmentHelper:
-    """Manages runtime fixed joint attachment between end-effector and saw"""
+    """
+    Manages the state of a runtime-created fixed joint to attach
+    the end-effector to the saw.
     
+    MODIFIED (v12): Uses sim._stage (attribute)
+    """
     def __init__(self, sim: SimulationContext, env_idx=0):
+        """
+        Initializes the helper and immediately creates the attachment.
+        """
         self.physx_utils = omni.physx.scripts.physicsUtils
         self.stage = sim._stage 
+        
         self.attachment_joint = None
         self.is_attached = False
+        
         self.joint_path = f"/World/envs/env_{env_idx}/DynamicAttachmentJoint"
+        
         print("[AttachmentHelper]: Initialized. Attaching by default...")
+        
         self._attach_saw_to_ee(env_idx)
 
     def _attach_saw_to_ee(self, env_idx=0):
-        """Creates fixed joint between end-effector and saw"""
+        """Creates a fixed joint between the EE and the saw."""
         if self.attachment_joint is not None:
             return
 
         ee_prim_path = f"/World/envs/env_{env_idx}/Robot/panda_hand"
         saw_prim_path = f"/World/envs/env_{env_idx}/Saw"   
         
-        # Tool Center Point offset and saw attachment point
         local_pos_ee = Gf.Vec3f(0.0, 0.0, 0.107) 
         local_rot_ee = Gf.Quatf(1.0, 0.0, 0.0, 0.0)
         local_pos_saw = Gf.Vec3f(-0.35, 0.0, 0.0) 
@@ -96,7 +107,7 @@ class AttachmentHelper:
             print(f"Exception while creating joint: {e}")
 
     def _detach_saw_from_ee(self):
-        """Removes the fixed joint"""
+        """Removes the fixed joint from the simulation."""
         if self.attachment_joint:
             try:
                 omni.usd.delete_prim(self.joint_path)
@@ -105,10 +116,12 @@ class AttachmentHelper:
                 print(f"SUCCESS: Removed joint at {self.joint_path}")
             except Exception as e:
                 print(f"Exception while removing joint: {e}")
+# --- END NEW ATTACHMENT HELPER CLASS ---
 
-# Keyboard handler
+
+# --- MODIFIED KEYBOARD HANDLER ---
 def _on_keyboard_event(event, saw_object: RigidObject):
-    """Keyboard callback for saw control"""
+    """Callback to apply velocity to the saw object"""
     global g_human_saw_velocity_cmd
     
     if event.type in (carb.input.KeyboardEventType.KEY_PRESS, carb.input.KeyboardEventType.KEY_REPEAT):
@@ -120,10 +133,14 @@ def _on_keyboard_event(event, saw_object: RigidObject):
     elif event.type == carb.input.KeyboardEventType.KEY_RELEASE:
         if event.input in (carb.input.KeyboardInput.J, carb.input.KeyboardInput.K):
             g_human_saw_velocity_cmd[0, 0] = 0.0
+# --- END MODIFIED KEYBOARD HANDLER ---
 
-# Robot control function (from original demo)
+
+# --- MODIFIED update_states (v11) ---
 def update_states(robot: Articulation, ee_frame_idx: int, arm_joint_ids: list[int]):
-    """Update robot states for operational space control"""
+    """
+    MODIFIED: Signature now accepts `ee_frame_idx` as an integer.
+    """
     ee_jacobi_idx = ee_frame_idx - 1 
     
     jacobian_w = robot.root_physx_view.get_jacobians()[:, ee_jacobi_idx, :, arm_joint_ids]
@@ -148,142 +165,135 @@ def update_states(robot: Articulation, ee_frame_idx: int, arm_joint_ids: list[in
     joint_pos = robot.data.joint_pos[:, arm_joint_ids]
     joint_vel = robot.data.joint_vel[:, arm_joint_ids]
     return jacobian_b, mass_matrix, gravity, ee_pose_b, ee_vel_b, joint_pos, joint_vel
+# --- END MODIFIED update_states ---
 
-def save_camera_image(camera: Camera, frame_count: int, save_dir: str = "/workspace/VLM_Inferred_HRI_safety/camera_output"):
-    """Save camera frame as image file for VLM processing"""
+
+# --- NEW: MINIMAL CAMERA SAVE FUNCTION ---
+def save_camera_image(camera: Camera, frame_count: int, save_dir: str = "./camera_output"):
+    """Minimal camera capture function - saves RGB as-is from Isaac Lab"""
     try:
-        # Create output directory if it doesn't exist
         os.makedirs(save_dir, exist_ok=True)
         
-        # Check if camera data is available
+        # Check camera data availability
         if not hasattr(camera.data, 'output') or "rgb" not in camera.data.output:
-            print(f"[Camera Warning]: Camera data not ready at frame {frame_count}")
             return None
             
-        # Get RGB data from camera
-        rgb_data = camera.data.output["rgb"]  # Shape: [num_envs, height, width, 4] (RGBA)
-        
-        # Check if data is valid (not all zeros/black)
-        if rgb_data is None or torch.all(rgb_data == 0):
-            print(f"[Camera Warning]: Empty camera data at frame {frame_count}")
+        # Get raw RGB data [num_envs, H, W, 3 or 4]
+        rgb_data = camera.data.output["rgb"]
+        if rgb_data is None:
             return None
         
-        # Convert to numpy and extract first environment
-        rgb_np = rgb_data[0].cpu().numpy()  # [height, width, 4]
-        rgb_np = (rgb_np[:, :, :3] * 255).astype(np.uint8)  # Convert to RGB and uint8
+        # Extract first environment, convert to numpy
+        rgb_np = rgb_data[0].cpu().numpy()
         
-        # Create PIL Image (removed black check - let's see actual output)
-        pil_image = Image.fromarray(rgb_np)
+        # Handle data type: Isaac Lab outputs float32 in [0, 1] range
+        if rgb_np.dtype in (np.float32, np.float64):
+            rgb_np = (np.clip(rgb_np, 0, 1) * 255).astype(np.uint8)
         
-        # Save with timestamp
-        filename = f"frame_{frame_count:06d}.png"
-        filepath = os.path.join(save_dir, filename)
+        # Drop alpha if present
+        if rgb_np.shape[2] == 4:
+            rgb_np = rgb_np[:, :, :3]
+        
+        # Save directly
+        pil_image = Image.fromarray(rgb_np, mode='RGB')
+        filepath = os.path.join(save_dir, f"frame_{frame_count:06d}.png")
         pil_image.save(filepath)
         
-        print(f"[Camera]: Saved frame {frame_count} -> {filepath} (avg brightness: {np.mean(rgb_np):.1f})")
+        print(f"[Camera] Saved frame {frame_count}")
         return filepath
         
     except Exception as e:
-        print(f"[Camera Error]: Failed to save frame {frame_count}: {e}")
+        print(f"[Camera Error] Frame {frame_count}: {e}")
         return None
+# --- END CAMERA SAVE FUNCTION ---
+
 
 def main():
-    """Main demo function with camera and robot setup"""
-    # Simulation configuration
     sim_cfg = SimulationCfg(dt=0.01, device=args_cli.device)
     sim = SimulationContext(sim_cfg)
     sim.set_camera_view([1.5, 1.5, 1.5], [0.0, 0.0, 0.5])
 
-    # Scene configuration
     scene_cfg = InteractiveSceneCfg(num_envs=args_cli.num_envs, env_spacing=2.0)
     
-    # Add robot
     scene_cfg.robot = FRANKA_PANDA_HIGH_PD_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot")
-    
-    # Add ground and lighting
     scene_cfg.ground = AssetBaseCfg(prim_path="/World/defaultGroundPlane", spawn=sim_utils.GroundPlaneCfg())
     scene_cfg.light = AssetBaseCfg(prim_path="/World/Light", spawn=sim_utils.DomeLightCfg(intensity=2000.0))
     
-    # Add saw object
     scene_cfg.saw = RigidObjectCfg(
         prim_path="{ENV_REGEX_NS}/Saw",
         spawn=sim_utils.CuboidCfg(
-            size=(0.7, 0.1, 0.02),  # Length, width, height
-            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.7, 0.7, 0.7), metallic=0.8),
-            rigid_props=sim_utils.RigidBodyPropertiesCfg(kinematic_enabled=False, disable_gravity=True),
-            collision_props=sim_utils.CollisionPropertiesCfg(collision_enabled=True)
+            size=(0.7, 0.1, 0.02),
+            visual_material=sim_utils.PreviewSurfaceCfg(
+                diffuse_color=(0.7, 0.7, 0.7),
+                metallic=0.8
+            ),
+            rigid_props=sim_utils.RigidBodyPropertiesCfg(
+                kinematic_enabled=False,
+                disable_gravity=True
+            ),
+            collision_props=sim_utils.CollisionPropertiesCfg(
+                collision_enabled=True
+            )
         ),
         init_state=RigidObjectCfg.InitialStateCfg(
             pos=(0.4, 0.0, 0.5),
-            rot=(0.707, 0.707, 0.0, 0.0),  # 90-degree rotation
+            rot=(0.707, 0.707, 0.0, 0.0),
             lin_vel=(0.0, 0.0, 0.0),
             ang_vel=(0.0, 0.0, 0.0)
         ),
     )
     
-    # *** FIXED: Camera with world convention to match Isaac Sim rendering ***
+    # --- NEW: ADD CAMERA TO SCENE ---
+    # This matches your GUI camera perspective exactly
     scene_cfg.camera = CameraCfg(
         prim_path="{ENV_REGEX_NS}/Camera",
-        update_period=0,  # Update every frame for real-time capture
+        update_period=0,  # Update every frame
         offset=CameraCfg.OffsetCfg(
-            pos=(0.5, 4.0, 0.75),  # Exact position from GUI
-            rot=(0.7071, 0.0, 0.0, -0.7071),  # 90°X, -180°Z rotation
-            convention="world"  # Changed from ros to world for proper rendering
+            pos=(0.5, 4.0, 0.75),  # Same as your sim.set_camera_view
+            rot=(0.7071, 0.0, 0.0, -0.7071),  # Looking down at the scene
+            convention="world"
         ),
         spawn=sim_utils.PinholeCameraCfg(
-            focal_length=18.14756,  # Exact from GUI
-            focus_distance=400.0,   # Exact from GUI
-            horizontal_aperture=20.955,  # Exact from GUI
-            clipping_range=(0.01, 10000000.0),  # Exact from GUI
+            focal_length=24.0,
+            focus_distance=400.0,
+            horizontal_aperture=20.955,
+            clipping_range=(0.1, 1000.0),
         ),
-        width=640,   # Exact from GUI
-        height=480,  # Exact from GUI  
-        data_types=["rgb"],  # RGB data
+        width=640,
+        height=480,
+        data_types=["rgb"],
     )
+    # --- END CAMERA ADDITION ---
 
-    # Create scene
     scene = InteractiveScene(scene_cfg)
     sim.reset()
-    
-    # Get scene objects
     robot = scene["robot"]
     saw = scene["saw"]
-    camera = scene["camera"]  # NEW: Camera access
+    camera = scene["camera"]  # NEW: Get camera reference
 
-    # Initialize attachment system
     attachment_helper = AttachmentHelper(sim, env_idx=0)
-    
+
     print(f"Successfully spawned robot: {robot.cfg.prim_path}")
     print(f"Successfully spawned saw: {saw.cfg.prim_path}")
-    print(f"Successfully spawned camera: {camera.cfg.prim_path}")
-    
-    # DEBUG: Print actual positions after spawning
-    print("\n[DEBUG] Object positions after spawning:")
-    print(f"Robot root position: {robot.data.root_pos_w[0]}")
-    print(f"Saw position: {saw.data.root_pos_w[0]}")
-    print(f"Camera position in config: (1.0, 2.0, 1.0)")
-    print(f"Camera should be looking at workspace around: (0.4, 0.0, 0.5)\n")
+    print(f"Successfully spawned camera: {camera.cfg.prim_path}")  # NEW
 
-    # Setup robot control
     sim_dt = sim.get_physics_dt()
     
-    # Keyboard setup
     carb_input = carb.input.acquire_input_interface()
     app_window = omni.appwindow.get_default_app_window()
     keyboard_sub = carb_input.subscribe_to_keyboard_events(
         app_window.get_keyboard(),
         lambda e, s=saw: _on_keyboard_event(e, s)
     )
-    
     print("--------------------")
-    print(" Camera + HRI Demo Initialized...")
+    print(" Keyboard Handler Initialized...")
     print(" K:   'Pull' saw (+ X direction)")
     print(" J:   'Push' saw (- X direction)")
-    print(" Camera: Recording at 640x480 resolution")
+    print(" Camera: Capturing every 30 frames")  # NEW
     print("--------------------")
     
-    # Robot control setup
     saw_vel_b = torch.zeros((scene.num_envs, 6), device=sim.device)
+    
     global g_human_saw_velocity_cmd
     g_human_saw_velocity_cmd = g_human_saw_velocity_cmd.to(sim.device)
     
@@ -293,7 +303,6 @@ def main():
     arm_joint_ids_list = robot.find_joints("panda_joint.*")
     arm_joint_ids = arm_joint_ids_list[0]
 
-    # OSC controller setup
     default_stiffness_tuple = (5000.0, 5000.0, 5000.0, 500.0, 500.0, 500.0)
     default_damping_ratio_tuple = (1.0, 1.0, 1.0, 1.0, 1.0, 1.0) 
 
@@ -311,35 +320,35 @@ def main():
     
     _, _, _, initial_ee_pose_b, _, _, _ = update_states(robot, ee_frame_idx_int, arm_joint_ids)
     initial_ee_quat_b = initial_ee_pose_b[:, 3:].clone()
-    joint_centers = torch.mean(robot.data.soft_joint_pos_limits[:, arm_joint_ids, :], dim=-1)
     
+    joint_centers = torch.mean(robot.data.soft_joint_pos_limits[:, arm_joint_ids, :], dim=-1)
+
     default_stiffness_tensor = torch.tensor([default_stiffness_tuple], device=sim.device)
     current_stiffness = default_stiffness_tensor.repeat(scene.num_envs, 1)
     
-    # *** INCREASED: Camera warmup to allow full scene rendering ***
+    # --- NEW: Camera capture variables ---
     frame_count = 0
-    camera_warmup_frames = 100  # Increased warmup - GUI works means rendering takes time
-    capture_frequency = 30      # Capture every 30 frames (1 per second)
-    
-    print(f"[Camera]: Warming up for {camera_warmup_frames} frames before capture...")
-    print(f"[Camera]: This ensures scene is fully rendered before capturing images")
+    capture_every = 30  # Capture every 30 frames (~0.3 seconds at 100 Hz)
+    # --- END CAMERA VARIABLES ---
     
     try:
-        # Main simulation loop
         while simulation_app.is_running():
             sim.step(render=True)
             robot.update(sim_dt)
             scene.update(sim_dt)  # This updates camera data
             
-            # Human control (keyboard input)
             saw_vel_b[:, :6] = g_human_saw_velocity_cmd.clone()
             saw.write_root_velocity_to_sim(saw_vel_b)
 
-            # Robot control
             jacobian_b, mass_matrix, gravity, ee_pose_b, ee_vel_b, joint_pos, joint_vel = update_states(robot, ee_frame_idx_int, arm_joint_ids)
+            
             target_ee_pose_b = initial_ee_pose_b.clone()
             
-            command = torch.cat([target_ee_pose_b, current_stiffness], dim=1)
+            command = torch.cat([
+                target_ee_pose_b, 
+                current_stiffness
+            ], dim=1)
+
             osc.set_command(command)
             joint_efforts = osc.compute(
                 current_ee_pose_b=ee_pose_b, current_ee_vel_b=ee_vel_b, mass_matrix=mass_matrix,
@@ -349,21 +358,19 @@ def main():
             robot.set_joint_effort_target(joint_efforts, joint_ids=arm_joint_ids)
             robot.write_data_to_sim()
             
-            # *** CAMERA CAPTURE: After scene update to get rendered data ***
-            if frame_count >= camera_warmup_frames and frame_count % capture_frequency == 0:
+            # --- NEW: Camera capture logic ---
+            if frame_count % capture_every == 0:
                 save_camera_image(camera, frame_count)
-            
             frame_count += 1
+            # --- END CAMERA CAPTURE ---
             
     finally:
-        # Cleanup
         if 'carb_input' in locals() and 'keyboard_sub' in locals() and keyboard_sub is not None:
             carb_input.unsubscribe_to_keyboard_events(app_window.get_keyboard(), keyboard_sub)
         
         if 'attachment_helper' in locals():
             attachment_helper._detach_saw_from_ee()
-            
-        print("Camera+HRI Demo shutdown complete.")
+        print("KeyboardHandler shutdown and joint detached.")
         simulation_app.close()
 
 if __name__ == "__main__":
