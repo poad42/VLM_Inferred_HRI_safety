@@ -23,10 +23,15 @@ import copy
 import torch
 
 # Boilerplate
-parser = argparse.ArgumentParser(description="A working baseline for the Operational Space Controller.")
-parser.add_argument("--num_envs", type=int, default=1, help="Number of environments to spawn.")
+parser = argparse.ArgumentParser(
+    description="A working baseline for the Operational Space Controller."
+)
+parser.add_argument(
+    "--num_envs", type=int, default=1, help="Number of environments to spawn."
+)
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
+args_cli.enable_cameras = True
 
 app_launcher = AppLauncher(args_cli)
 simulation_app = app_launcher.app
@@ -35,10 +40,25 @@ simulation_app = app_launcher.app
 from isaaclab.sim import SimulationCfg, SimulationContext
 import isaaclab.sim as sim_utils
 from isaaclab.scene import InteractiveScene, InteractiveSceneCfg
-from isaaclab.assets import Articulation, ArticulationCfg, AssetBaseCfg, RigidObject, RigidObjectCfg
+from isaaclab.assets import (
+    Articulation,
+    ArticulationCfg,
+    AssetBaseCfg,
+    RigidObject,
+    RigidObjectCfg,
+)
+
 # from isaaclab.sensors import CameraCfg # REMOVED CAMERA
-from isaaclab.controllers import OperationalSpaceController, OperationalSpaceControllerCfg
-from isaaclab.utils.math import matrix_from_quat, quat_inv, subtract_frame_transforms, quat_apply_inverse
+from isaaclab.controllers import (
+    OperationalSpaceController,
+    OperationalSpaceControllerCfg,
+)
+from isaaclab.utils.math import (
+    matrix_from_quat,
+    quat_inv,
+    subtract_frame_transforms,
+    quat_apply_inverse,
+)
 import carb.input
 import omni.appwindow
 from pxr import Gf
@@ -47,20 +67,26 @@ from isaaclab_assets import FRANKA_PANDA_HIGH_PD_CFG
 # --- NEW ATTACHMENT IMPORT (v11 FIX) ---
 import omni.physx.scripts.physicsUtils
 import omni.usd
+import omni.physx.scripts.physicsUtils
+import omni.usd
+from camera_utils import add_camera_to_scene, save_camera_image
+
 # --- END NEW IMPORTS ---
 
 # --- KEYBOARD IMPL (MODIFIED) ---
-g_human_saw_velocity_cmd = torch.zeros(1, 6) # [vx, vy, vz, wx, wy, wz]
-SAW_VELOCITY = 0.5 # m/s
+g_human_saw_velocity_cmd = torch.zeros(1, 6)  # [vx, vy, vz, wx, wy, wz]
+SAW_VELOCITY = 0.5  # m/s
+
 
 # --- NEW ATTACHMENT HELPER CLASS (v12) ---
 class AttachmentHelper:
     """
     Manages the state of a runtime-created fixed joint to attach
     the end-effector to the saw.
-    
+
     MODIFIED (v12): Uses sim._stage (attribute)
     """
+
     # --- MODIFIED __init__ ---
     def __init__(self, sim: SimulationContext, env_idx=0):
         """
@@ -70,17 +96,17 @@ class AttachmentHelper:
         # Get the physics utils and the stage
         self.physx_utils = omni.physx.scripts.physicsUtils
         # Access `_stage` as an attribute (no parentheses)
-        self.stage = sim._stage 
+        self.stage = sim._stage
         # --- END API FIX ---
-        
+
         self.attachment_joint = None
         self.is_attached = False
-        
+
         # Define a unique path for the new joint prim
         self.joint_path = f"/World/envs/env_{env_idx}/DynamicAttachmentJoint"
-        
+
         print("[AttachmentHelper]: Initialized. Attaching by default...")
-        
+
         # --- ATTACH ON INIT ---
         self._attach_saw_to_ee(env_idx)
         # --- END ATTACH ON INIT ---
@@ -92,16 +118,18 @@ class AttachmentHelper:
 
         # Define the prim paths for the two bodies to be joined
         # These must be acquired from your scene/asset definitions
-        ee_prim_path = f"/World/envs/env_{env_idx}/Robot/panda_hand" # Matches ee_frame_name
-        saw_prim_path = f"/World/envs/env_{env_idx}/Saw"   
-        
+        ee_prim_path = (
+            f"/World/envs/env_{env_idx}/Robot/panda_hand"  # Matches ee_frame_name
+        )
+        saw_prim_path = f"/World/envs/env_{env_idx}/Saw"
+
         # This attaches to the Tool Center Point (TCP), 10.7cm "out" from the wrist
-        local_pos_ee = Gf.Vec3f(0.0, 0.0, 0.107) 
+        local_pos_ee = Gf.Vec3f(0.0, 0.0, 0.107)
         local_rot_ee = Gf.Quatf(1.0, 0.0, 0.0, 0.0)
-        
+
         # This addresses the "one end of the saw" request.
         # Assumes the saw is 0.7 long, so -0.35 is one end.
-        local_pos_saw = Gf.Vec3f(-0.35, 0.0, 0.0) 
+        local_pos_saw = Gf.Vec3f(-0.35, 0.0, 0.0)
         # This is a 90-degree rotation around the Y-axis (w, x, y, z)
         local_rot_saw = Gf.Quatf(0.707, 0.0, 0.707, 0.0)
 
@@ -117,18 +145,18 @@ class AttachmentHelper:
                 localRot0=local_rot_ee,
                 localPos1=local_pos_saw,
                 localRot1=local_rot_saw,
-                breakForce=1.0e30, # 0.0 = unbreakable
-                breakTorque=1.0e30 # 0.0 = unbreakable
+                breakForce=1.0e30,  # 0.0 = unbreakable
+                breakTorque=1.0e30,  # 0.0 = unbreakable
             )
             # --- END API FIX ---
-            
+
             if joint_prim:
                 self.attachment_joint = joint_prim
                 self.is_attached = True
                 print(f"SUCCESS: Created joint at {self.joint_path}")
             else:
                 print(f"ERROR: Failed to create joint at {self.joint_path}")
-                
+
         except Exception as e:
             print(f"Exception while creating joint: {e}")
 
@@ -145,6 +173,8 @@ class AttachmentHelper:
                 print(f"SUCCESS: Removed joint at {self.joint_path}")
             except Exception as e:
                 print(f"Exception while removing joint: {e}")
+
+
 # --- END NEW ATTACHMENT HELPER CLASS ---
 
 
@@ -152,20 +182,25 @@ class AttachmentHelper:
 def _on_keyboard_event(event, saw_object: RigidObject):
     """Callback to apply velocity to the saw object"""
     global g_human_saw_velocity_cmd
-    
-    if event.type in (carb.input.KeyboardEventType.KEY_PRESS, carb.input.KeyboardEventType.KEY_REPEAT):
+
+    if event.type in (
+        carb.input.KeyboardEventType.KEY_PRESS,
+        carb.input.KeyboardEventType.KEY_REPEAT,
+    ):
         if event.input == carb.input.KeyboardInput.K:
             # "Pull" saw (positive X direction)
-            g_human_saw_velocity_cmd[0, 0] = SAW_VELOCITY # Apply to linear X
+            g_human_saw_velocity_cmd[0, 0] = SAW_VELOCITY  # Apply to linear X
         elif event.input == carb.input.KeyboardInput.J:
             # "Push" saw (negative X direction)
-            g_human_saw_velocity_cmd[0, 0] = -SAW_VELOCITY # Apply to linear X
+            g_human_saw_velocity_cmd[0, 0] = -SAW_VELOCITY  # Apply to linear X
         # --- REMOVED 'T' KEY ---
-            
+
     elif event.type == carb.input.KeyboardEventType.KEY_RELEASE:
         if event.input in (carb.input.KeyboardInput.J, carb.input.KeyboardInput.K):
             # Stop saw
             g_human_saw_velocity_cmd[0, 0] = 0.0
+
+
 # --- END MODIFIED KEYBOARD HANDLER ---
 
 
@@ -175,22 +210,31 @@ def update_states(robot: Articulation, ee_frame_idx: int, arm_joint_ids: list[in
     MODIFIED: Signature now accepts `ee_frame_idx` as an integer.
     """
     # `ee_frame_idx` is now an int, no indexing needed
-    ee_jacobi_idx = ee_frame_idx - 1 
-    
-    jacobian_w = robot.root_physx_view.get_jacobians()[:, ee_jacobi_idx, :, arm_joint_ids]
-    mass_matrix = robot.root_physx_view.get_generalized_mass_matrices()[:, arm_joint_ids, :][:, :, arm_joint_ids]
+    ee_jacobi_idx = ee_frame_idx - 1
+
+    jacobian_w = robot.root_physx_view.get_jacobians()[
+        :, ee_jacobi_idx, :, arm_joint_ids
+    ]
+    mass_matrix = robot.root_physx_view.get_generalized_mass_matrices()[
+        :, arm_joint_ids, :
+    ][:, :, arm_joint_ids]
     gravity = robot.root_physx_view.get_gravity_compensation_forces()[:, arm_joint_ids]
     jacobian_b = jacobian_w.clone()
     root_rot_matrix = matrix_from_quat(quat_inv(robot.data.root_quat_w))
     jacobian_b[:, :3, :] = torch.bmm(root_rot_matrix, jacobian_b[:, :3, :])
     jacobian_b[:, 3:, :] = torch.bmm(root_rot_matrix, jacobian_b[:, 3:, :])
     root_pos_w, root_quat_w = robot.data.root_pos_w, robot.data.root_quat_w
-    
+
     # Use the integer index
-    ee_pos_w, ee_quat_w = robot.data.body_pos_w[:, ee_frame_idx], robot.data.body_quat_w[:, ee_frame_idx]
-    ee_pos_b, ee_quat_b = subtract_frame_transforms(root_pos_w, root_quat_w, ee_pos_w, ee_quat_w)
+    ee_pos_w, ee_quat_w = (
+        robot.data.body_pos_w[:, ee_frame_idx],
+        robot.data.body_quat_w[:, ee_frame_idx],
+    )
+    ee_pos_b, ee_quat_b = subtract_frame_transforms(
+        root_pos_w, root_quat_w, ee_pos_w, ee_quat_w
+    )
     ee_pose_b = torch.cat([ee_pos_b, ee_quat_b], dim=-1)
-    
+
     # Use the integer index
     ee_vel_w = robot.data.body_vel_w[:, ee_frame_idx, :]
     root_vel_w = robot.data.root_vel_w
@@ -201,7 +245,10 @@ def update_states(robot: Articulation, ee_frame_idx: int, arm_joint_ids: list[in
     joint_pos = robot.data.joint_pos[:, arm_joint_ids]
     joint_vel = robot.data.joint_vel[:, arm_joint_ids]
     return jacobian_b, mass_matrix, gravity, ee_pose_b, ee_vel_b, joint_pos, joint_vel
+
+
 # --- END MODIFIED update_states ---
+
 
 def main():
     sim_cfg = SimulationCfg(dt=0.01, device=args_cli.device)
@@ -210,41 +257,46 @@ def main():
 
     # Create the scene_cfg instance
     scene_cfg = InteractiveSceneCfg(num_envs=args_cli.num_envs, env_spacing=2.0)
-    
+
     # Add the robot, ground, and light
     scene_cfg.robot = FRANKA_PANDA_HIGH_PD_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot")
-    scene_cfg.ground = AssetBaseCfg(prim_path="/World/defaultGroundPlane", spawn=sim_utils.GroundPlaneCfg())
-    scene_cfg.light = AssetBaseCfg(prim_path="/World/Light", spawn=sim_utils.DomeLightCfg(intensity=2000.0))
-    
+    scene_cfg.ground = AssetBaseCfg(
+        prim_path="/World/defaultGroundPlane", spawn=sim_utils.GroundPlaneCfg()
+    )
+    scene_cfg.light = AssetBaseCfg(
+        prim_path="/World/Light", spawn=sim_utils.DomeLightCfg(intensity=2000.0)
+    )
+
     # Add the "saw" object
     scene_cfg.saw = RigidObjectCfg(
         prim_path="{ENV_REGEX_NS}/Saw",
         spawn=sim_utils.CuboidCfg(
-            size=(0.7, 0.1, 0.02), # (length, width, height)
+            size=(0.7, 0.1, 0.02),  # (length, width, height)
             visual_material=sim_utils.PreviewSurfaceCfg(
-                diffuse_color=(0.7, 0.7, 0.7),
-                metallic=0.8
+                diffuse_color=(0.7, 0.7, 0.7), metallic=0.8
             ),
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
-                kinematic_enabled=False,
-                disable_gravity=True
+                kinematic_enabled=False, disable_gravity=True
             ),
-            collision_props=sim_utils.CollisionPropertiesCfg(
-                collision_enabled=True
-            )
+            collision_props=sim_utils.CollisionPropertiesCfg(collision_enabled=True),
         ),
         init_state=RigidObjectCfg.InitialStateCfg(
-            pos=(0.4, 0.0, 0.5), # Offset Y to avoid collision
-            rot=(0.707, 0.707, 0.0, 0.0), # Rotated 90-deg around X-axis
+            pos=(0.4, 0.0, 0.5),  # Offset Y to avoid collision
+            rot=(0.707, 0.707, 0.0, 0.0),  # Rotated 90-deg around X-axis
             lin_vel=(0.0, 0.0, 0.0),
-            ang_vel=(0.0, 0.0, 0.0)
+            ang_vel=(0.0, 0.0, 0.0),
         ),
     )
+
+    # --- NEW: ADD CAMERA TO SCENE ---
+    add_camera_to_scene(scene_cfg)
+    # --- END CAMERA ADDITION ---
 
     scene = InteractiveScene(scene_cfg)
     sim.reset()
     robot = scene["robot"]
     saw = scene["saw"]
+    camera = scene["camera"]  # NEW: Get camera reference
 
     # --- MODIFIED (v12) ---
     # Instantiate the helper, passing the sim object.
@@ -254,9 +306,10 @@ def main():
 
     print(f"Successfully spawned robot: {robot.cfg.prim_path}")
     print(f"Successfully spawned saw: {saw.cfg.prim_path}")
+    print(f"Successfully spawned camera: {camera.cfg.prim_path}")  # NEW
 
     sim_dt = sim.get_physics_dt()
-    
+
     # --- MODIFIED ---
     # We subscribe the velocity-only callback function
     carb_input = carb.input.acquire_input_interface()
@@ -264,30 +317,32 @@ def main():
     keyboard_sub = carb_input.subscribe_to_keyboard_events(
         app_window.get_keyboard(),
         # Pass only the saw object
-        lambda e, s=saw: _on_keyboard_event(e, s)
+        lambda e, s=saw: _on_keyboard_event(e, s),
     )
+    print(f"Successfully spawned saw: {saw.cfg.prim_path}")
     print("--------------------")
     print(" Keyboard Handler Initialized...")
     print(" K:   'Pull' saw (+ X direction)")
     print(" J:   'Push' saw (- X direction)")
     print(" T:   Toggle REMOVED. Attached by default.")
+    print(" Camera: Capturing every 30 frames")  # NEW
     print("--------------------")
     # --- END MODIFIED ---
-    
+
     # Buffer for VELOCITY control
     saw_vel_b = torch.zeros((scene.num_envs, 6), device=sim.device)
-    
+
     # Move the global buffer to the correct device
     global g_human_saw_velocity_cmd
     g_human_saw_velocity_cmd = g_human_saw_velocity_cmd.to(sim.device)
-    
+
     ee_frame_name = "panda_hand"
     # --- MODIFIED (v11) ---
     # Get the list of lists
     ee_frame_idx_list = robot.find_bodies(ee_frame_name)
     # --- TYPEERROR FIX ---
     # Get list for env 0, then get first index
-    ee_frame_idx_int = ee_frame_idx_list[0][0] 
+    ee_frame_idx_int = ee_frame_idx_list[0][0]
     # --- END TYPEERROR FIX ---
     # find_joints() returns a list of lists, one for each environment
     arm_joint_ids_list = robot.find_joints("panda_joint.*")
@@ -296,40 +351,51 @@ def main():
 
     # --- Use stable "Idle" values from Plan Table 1 ---
     default_stiffness_tuple = (5000.0, 5000.0, 5000.0, 500.0, 500.0, 500.0)
-    default_damping_ratio_tuple = (1.0, 1.0, 1.0, 1.0, 1.0, 1.0) 
+    default_damping_ratio_tuple = (1.0, 1.0, 1.0, 1.0, 1.0, 1.0)
 
     osc_cfg = OperationalSpaceControllerCfg(
-        target_types=["pose_abs"], 
-        impedance_mode="variable_kp", 
+        target_types=["pose_abs"],
+        impedance_mode="variable_kp",
         inertial_dynamics_decoupling=True,
-        nullspace_control="position", 
+        nullspace_control="position",
         motion_stiffness_task=default_stiffness_tuple,
         motion_damping_ratio_task=default_damping_ratio_tuple,
     )
 
     osc = OperationalSpaceController(osc_cfg, scene.num_envs, sim.device)
     robot.update(sim_dt)
-    
+
     # --- MODIFIED (v11) ---
     # Pass the *integer* index to update_states
-    _, _, _, initial_ee_pose_b, _, _, _ = update_states(robot, ee_frame_idx_int, arm_joint_ids)
+    _, _, _, initial_ee_pose_b, _, _, _ = update_states(
+        robot, ee_frame_idx_int, arm_joint_ids
+    )
     # --- END MODIFIED ---
-    
+
     # We only need the initial ORIENTATION
     initial_ee_quat_b = initial_ee_pose_b[:, 3:].clone()
-    
-    joint_centers = torch.mean(robot.data.soft_joint_pos_limits[:, arm_joint_ids, :], dim=-1)
+
+    joint_centers = torch.mean(
+        robot.data.soft_joint_pos_limits[:, arm_joint_ids, :], dim=-1
+    )
 
     # --- We only need a buffer for stiffness ---
-    default_stiffness_tensor = torch.tensor([default_stiffness_tuple], device=sim.device)
+    default_stiffness_tensor = torch.tensor(
+        [default_stiffness_tuple], device=sim.device
+    )
     current_stiffness = default_stiffness_tensor.repeat(scene.num_envs, 1)
-    
+
+    # --- NEW: Camera capture variables ---
+    frame_count = 0
+    capture_every = 30  # Capture every 30 frames (~0.3 seconds at 100 Hz)
+    # --- END CAMERA VARIABLES ---
+
     try:
         while simulation_app.is_running():
             sim.step(render=True)
             robot.update(sim_dt)
-            scene.update(sim_dt) 
-            
+            scene.update(sim_dt)  # This updates camera data
+
             # --- HRI (Human) Control Loop ---
             # Update the buffer from the global command
             saw_vel_b[:, :6] = g_human_saw_velocity_cmd.clone()
@@ -339,42 +405,65 @@ def main():
             # --- ROBOT CONTROL LOGIC (MODIFIED FOR ATTACHMENT) ---
             # --- TYPEERROR FIX (v11) ---
             # Pass the *integer* index
-            jacobian_b, mass_matrix, gravity, ee_pose_b, ee_vel_b, joint_pos, joint_vel = update_states(robot, ee_frame_idx_int, arm_joint_ids)
+            (
+                jacobian_b,
+                mass_matrix,
+                gravity,
+                ee_pose_b,
+                ee_vel_b,
+                joint_pos,
+                joint_vel,
+            ) = update_states(robot, ee_frame_idx_int, arm_joint_ids)
             # --- END TYPEERROR FIX ---
-            
+
             # --- MODIFIED ---
             # Since we are always attached, we are always compliant.
             # Set OSC target to its *current* pose.
             target_ee_pose_b = initial_ee_pose_b.clone()
             # --- END MODIFIED ---
-            
+
             # Action dim = 7 (pose) + 6 (stiffness) = 13
-            command = torch.cat([
-                target_ee_pose_b, 
-                current_stiffness
-            ], dim=1)
+            command = torch.cat([target_ee_pose_b, current_stiffness], dim=1)
             # --- END ROBOT CONTROL LOGIC ---
 
             osc.set_command(command)
             joint_efforts = osc.compute(
-                current_ee_pose_b=ee_pose_b, current_ee_vel_b=ee_vel_b, mass_matrix=mass_matrix,
-                jacobian_b=jacobian_b, gravity=gravity, current_joint_pos=joint_pos,
-                current_joint_vel=joint_vel, nullspace_joint_pos_target=joint_centers,
+                current_ee_pose_b=ee_pose_b,
+                current_ee_vel_b=ee_vel_b,
+                mass_matrix=mass_matrix,
+                jacobian_b=jacobian_b,
+                gravity=gravity,
+                current_joint_pos=joint_pos,
+                current_joint_vel=joint_vel,
+                nullspace_joint_pos_target=joint_centers,
             )
             robot.set_joint_effort_target(joint_efforts, joint_ids=arm_joint_ids)
             robot.write_data_to_sim()
-            
+
+            # --- NEW: Camera capture logic ---
+            if frame_count % capture_every == 0:
+                save_camera_image(camera, frame_count)
+            frame_count += 1
+            # --- END CAMERA CAPTURE ---
+
     finally:
         # --- Unsubscribe the global function ---
-        if 'carb_input' in locals() and 'keyboard_sub' in locals() and keyboard_sub is not None:
-            carb_input.unsubscribe_to_keyboard_events(app_window.get_keyboard(), keyboard_sub)
-        
+        if (
+            "carb_input" in locals()
+            and "keyboard_sub" in locals()
+            and keyboard_sub is not None
+        ):
+            carb_input.unsubscribe_to_keyboard_events(
+                app_window.get_keyboard(), keyboard_sub
+            )
+
         # --- Detach on exit ---
-        if 'attachment_helper' in locals():
+        if "attachment_helper" in locals():
             attachment_helper._detach_saw_from_ee()
         print("KeyboardHandler shutdown and joint detached.")
         # --- END ---
         simulation_app.close()
+
 
 if __name__ == "__main__":
     main()
