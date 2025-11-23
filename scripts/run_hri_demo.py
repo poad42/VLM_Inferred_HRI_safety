@@ -300,6 +300,34 @@ def main():
         ),
     )
 
+    # Add the "log" object (box shape for simplicity)
+    scene_cfg.log = RigidObjectCfg(
+        prim_path="{ENV_REGEX_NS}/Log",
+        spawn=sim_utils.CuboidCfg(
+            size=(0.8, 0.2, 0.2),  # 80cm long, 20cm x 20cm cross-section
+            visual_material=sim_utils.PreviewSurfaceCfg(
+                diffuse_color=(0.6, 0.4, 0.2),  # Brown wood color
+            ),
+            rigid_props=sim_utils.RigidBodyPropertiesCfg(
+                kinematic_enabled=True,  # Static log
+                disable_gravity=False,
+            ),
+            collision_props=sim_utils.CollisionPropertiesCfg(
+                collision_enabled=True,
+            ),
+        ),
+        init_state=RigidObjectCfg.InitialStateCfg(
+            # Position: EE at ~(0.1, 0, 0.5), saw extends 0.7m, so log at 0.9m+ to avoid collision
+            pos=(1.0, 0.0, 0.4),  # 1m in front, at sawing height
+            rot=(
+                0.707,
+                0.0,
+                0.0,
+                0.707,
+            ),  # 90° rotation around Z-axis (longer side parallel to robot)
+        ),
+    )
+
     # --- NEW: ADD CAMERA TO SCENE ---
     add_camera_to_scene(scene_cfg)
     # --- END CAMERA ADDITION ---
@@ -308,6 +336,7 @@ def main():
     sim.reset()
     robot = scene["robot"]
     saw = scene["saw"]
+    log = scene["log"]
     camera = scene["camera"]  # NEW: Get camera reference
 
     # --- MODIFIED (v12) ---
