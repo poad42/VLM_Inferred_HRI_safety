@@ -58,6 +58,8 @@ from isaaclab.utils.math import (
     quat_inv,
     subtract_frame_transforms,
     quat_apply_inverse,
+    combine_frame_transforms,
+    quat_apply,
 )
 import carb.input
 import omni.appwindow
@@ -74,8 +76,8 @@ from camera_utils import add_camera_to_scene, save_camera_image
 # --- END NEW IMPORTS ---
 
 # --- KEYBOARD IMPL (MODIFIED) ---
-g_human_saw_velocity_cmd = torch.zeros(1, 6)  # [vx, vy, vz, wx, wy, wz]
-SAW_VELOCITY = 0.5  # m/s
+g_human_saw_force_cmd_ee = torch.zeros(1, 3)  # Force in EE frame [fx, fy, fz]
+g_force_magnitude = 5.0  # N (start with lower force to avoid breaking joint)
 
 
 # --- NEW ATTACHMENT HELPER CLASS (v12) ---
@@ -164,10 +166,8 @@ class AttachmentHelper:
         """Removes the fixed joint from the simulation."""
         if self.attachment_joint:
             try:
-                # --- API FIX (v11) ---
-                # Delete the prim from the stage
-                omni.usd.delete_prim(self.joint_path)
-                # --- END API FIX ---
+                # Remove the joint prim from the stage
+                self.stage.RemovePrim(self.joint_path)
                 self.attachment_joint = None
                 self.is_attached = False
                 print(f"SUCCESS: Removed joint at {self.joint_path}")
@@ -180,25 +180,25 @@ class AttachmentHelper:
 
 # --- MODIFIED KEYBOARD HANDLER ---
 def _on_keyboard_event(event, saw_object: RigidObject):
-    """Callback to apply velocity to the saw object"""
-    global g_human_saw_velocity_cmd
+    """Callback to apply force to the saw object"""
+    global g_human_saw_force_cmd_ee, g_force_magnitude
 
     if event.type in (
         carb.input.KeyboardEventType.KEY_PRESS,
         carb.input.KeyboardEventType.KEY_REPEAT,
     ):
         if event.input == carb.input.KeyboardInput.K:
-            # "Pull" saw (positive X direction)
-            g_human_saw_velocity_cmd[0, 0] = SAW_VELOCITY  # Apply to linear X
+            # "Pull" saw (+ X direction in EE frame = along saw length)
+            g_human_saw_force_cmd_ee[0, 0] = g_force_magnitude
         elif event.input == carb.input.KeyboardInput.J:
-            # "Push" saw (negative X direction)
-            g_human_saw_velocity_cmd[0, 0] = -SAW_VELOCITY  # Apply to linear X
+            # "Push" saw (- X direction in EE frame = along saw length)
+            g_human_saw_force_cmd_ee[0, 0] = -g_force_magnitude
         # --- REMOVED 'T' KEY ---
 
     elif event.type == carb.input.KeyboardEventType.KEY_RELEASE:
         if event.input in (carb.input.KeyboardInput.J, carb.input.KeyboardInput.K):
-            # Stop saw
-            g_human_saw_velocity_cmd[0, 0] = 0.0
+            # Stop force
+            g_human_saw_force_cmd_ee[0, 0] = 0.0
 
 
 # --- END MODIFIED KEYBOARD HANDLER ---
@@ -333,8 +333,8 @@ def main():
     saw_vel_b = torch.zeros((scene.num_envs, 6), device=sim.device)
 
     # Move the global buffer to the correct device
-    global g_human_saw_velocity_cmd
-    g_human_saw_velocity_cmd = g_human_saw_velocity_cmd.to(sim.device)
+    global g_human_saw_force_cmd_ee
+    g_human_saw_force_cmd_ee = g_human_saw_force_cmd_ee.to(sim.device)
 
     ee_frame_name = "panda_hand"
     # --- MODIFIED (v11) ---
@@ -386,21 +386,17 @@ def main():
     current_stiffness = default_stiffness_tensor.repeat(scene.num_envs, 1)
 
     # --- NEW: Camera capture variables ---
+    # --- NEW: Camera capture variables ---
     frame_count = 0
     capture_every = 30  # Capture every 30 frames (~0.3 seconds at 100 Hz)
     # --- END CAMERA VARIABLES ---
 
     try:
+        print("[DEBUG] Entering simulation loop...")
         while simulation_app.is_running():
             sim.step(render=True)
             robot.update(sim_dt)
             scene.update(sim_dt)  # This updates camera data
-
-            # --- HRI (Human) Control Loop ---
-            # Update the buffer from the global command
-            saw_vel_b[:, :6] = g_human_saw_velocity_cmd.clone()
-            # Write velocity to the saw
-            saw.write_root_velocity_to_sim(saw_vel_b)
 
             # --- ROBOT CONTROL LOGIC (MODIFIED FOR ATTACHMENT) ---
             # --- TYPEERROR FIX (v11) ---
@@ -415,6 +411,23 @@ def main():
                 joint_vel,
             ) = update_states(robot, ee_frame_idx_int, arm_joint_ids)
             # --- END TYPEERROR FIX ---
+
+            # --- HRI (Human) Control Loop - FORCE CONTROL ---
+            # Get EE orientation quaternion (base frame)
+            ee_quat_b = ee_pose_b[:, 3:7]  # [num_envs, 4] quaternion (w, x, y, z)
+
+            # Transform force from EE frame to world/base frame
+            # quat_apply rotates a vector by a quaternion
+            force_ee = g_human_saw_force_cmd_ee.clone()  # [1, 3]
+            force_world = quat_apply(ee_quat_b, force_ee)  # [num_envs, 3]
+
+            # Apply force to saw as external wrench
+            # Create indices for all environments
+            indices = torch.arange(scene.num_envs, dtype=torch.int32, device=sim.device)
+            saw.root_physx_view.apply_forces(
+                force_world, indices=indices, is_global=True
+            )
+            # --- END HRI CONTROL LOOP ---
 
             # --- MODIFIED ---
             # Since we are always attached, we are always compliant.
@@ -444,7 +457,18 @@ def main():
             if frame_count % capture_every == 0:
                 save_camera_image(camera, frame_count)
             frame_count += 1
-            # --- END CAMERA CAPTURE ---
+
+            # Debug output every 30 frames
+            if frame_count % 30 == 0:
+                print(f"[DEBUG] Frame {frame_count} - Loop running...")
+
+        print("[DEBUG] Exited simulation loop normally")
+
+    except Exception as e:
+        print(f"[ERROR] Exception in simulation loop: {e}")
+        import traceback
+
+        traceback.print_exc()  # --- END CAMERA CAPTURE ---
 
     finally:
         # --- Unsubscribe the global function ---
