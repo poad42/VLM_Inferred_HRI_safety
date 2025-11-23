@@ -193,6 +193,18 @@ def _on_keyboard_event(event, saw_object: RigidObject):
         elif event.input == carb.input.KeyboardInput.J:
             # "Push" saw (- X direction in EE frame = along saw length)
             g_human_saw_force_cmd_ee[0, 0] = -g_force_magnitude
+        elif event.input == carb.input.KeyboardInput.U:
+            # Increase force magnitude
+            g_force_magnitude += 5.0
+            print(f"[Force Control] Increased force to {g_force_magnitude:.1f} N")
+        elif event.input == carb.input.KeyboardInput.M:
+            # Decrease force magnitude (minimum 0)
+            g_force_magnitude = max(0.0, g_force_magnitude - 5.0)
+            print(f"[Force Control] Decreased force to {g_force_magnitude:.1f} N")
+        elif event.input == carb.input.KeyboardInput.R:
+            # Reset force magnitude to default
+            g_force_magnitude = 5.0
+            print(f"[Force Control] Reset force to {g_force_magnitude:.1f} N")
         # --- REMOVED 'T' KEY ---
 
     elif event.type == carb.input.KeyboardEventType.KEY_RELEASE:
@@ -324,6 +336,9 @@ def main():
     print(" Keyboard Handler Initialized...")
     print(" K:   'Pull' saw (+ X direction)")
     print(" J:   'Push' saw (- X direction)")
+    print(" U:   Increase force magnitude (+5 N)")
+    print(" M:   Decrease force magnitude (-5 N)")
+    print(" R:   Reset force magnitude (5 N)")
     print(" T:   Toggle REMOVED. Attached by default.")
     print(" Camera: Capturing every 30 frames")  # NEW
     print("--------------------")
