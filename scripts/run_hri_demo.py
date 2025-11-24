@@ -49,6 +49,8 @@ from isaaclab.assets import (
 )
 
 # from isaaclab.sensors import CameraCfg # REMOVED CAMERA
+from isaaclab.sensors import FrameTransformerCfg
+from isaaclab.sensors.frame_transformer import OffsetCfg
 from isaaclab.controllers import (
     OperationalSpaceController,
     OperationalSpaceControllerCfg,
@@ -271,7 +273,24 @@ def main():
     scene_cfg = InteractiveSceneCfg(num_envs=args_cli.num_envs, env_spacing=2.0)
 
     # Add the robot, ground, and light
-    scene_cfg.robot = FRANKA_PANDA_HIGH_PD_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot")
+    # Configure robot with initial joint positions to extend arm toward log
+    scene_cfg.robot = FRANKA_PANDA_HIGH_PD_CFG.replace(
+        prim_path="{ENV_REGEX_NS}/Robot",
+        init_state=ArticulationCfg.InitialStateCfg(
+            # Joint positions to extend arm forward toward log (X~0.5-0.6)
+            # These values position the EE approximately at [0.5, 0.0, 0.55]
+            joint_pos={
+                "panda_joint1": 0.0,
+                "panda_joint2": -0.5,  # Shoulder down
+                "panda_joint3": 0.0,
+                "panda_joint4": -2.0,  # Elbow bent to reach forward
+                "panda_joint5": 0.0,
+                "panda_joint6": 1.5,  # Wrist up
+                "panda_joint7": 0.785,  # Rotated 45°
+                "panda_finger_joint.*": 0.04,  # Gripper open
+            },
+        ),
+    )
     scene_cfg.ground = AssetBaseCfg(
         prim_path="/World/defaultGroundPlane", spawn=sim_utils.GroundPlaneCfg()
     )
@@ -287,14 +306,27 @@ def main():
             visual_material=sim_utils.PreviewSurfaceCfg(
                 diffuse_color=(0.7, 0.7, 0.7), metallic=0.8
             ),
+            # PHYSICS FIX 1: Tuned rigid body properties
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
-                kinematic_enabled=False, disable_gravity=True
+                kinematic_enabled=False,
+                disable_gravity=True,
+                max_depenetration_velocity=0.1,  # Prevent explosive ejection
+                solver_position_iteration_count=12,  # Increase from default 4
+                solver_velocity_iteration_count=4,  # Increase from default 1
             ),
             collision_props=sim_utils.CollisionPropertiesCfg(collision_enabled=True),
+            # PHYSICS FIX 2: Material properties for stable contact
+            physics_material=sim_utils.RigidBodyMaterialCfg(
+                static_friction=0.8,  # High friction to bite into wood
+                dynamic_friction=0.5,  # Moderate friction for sawing
+                restitution=0.0,  # NO BOUNCING (critical!)
+                friction_combine_mode="max",
+                restitution_combine_mode="min",
+            ),
         ),
         init_state=RigidObjectCfg.InitialStateCfg(
-            pos=(0.4, 0.0, 0.5),  # Offset Y to avoid collision
-            rot=(0.707, 0.707, 0.0, 0.0),  # Rotated 90-deg around X-axis
+            pos=(0.35, 0.0, 0.55),
+            rot=(0.707107, -0.707107, 0.0, 0.0),  # RotX(-90°) - restoring original
             lin_vel=(0.0, 0.0, 0.0),
             ang_vel=(0.0, 0.0, 0.0),
         ),
@@ -308,17 +340,30 @@ def main():
             visual_material=sim_utils.PreviewSurfaceCfg(
                 diffuse_color=(0.6, 0.4, 0.2),  # Brown wood color
             ),
+            # PHYSICS FIX: Same tuned properties as saw
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
                 kinematic_enabled=True,  # Static log
                 disable_gravity=False,
+                max_depenetration_velocity=0.1,
+                solver_position_iteration_count=12,
+                solver_velocity_iteration_count=4,
             ),
             collision_props=sim_utils.CollisionPropertiesCfg(
                 collision_enabled=True,
             ),
+            # PHYSICS FIX: Matching material for stable contact
+            physics_material=sim_utils.RigidBodyMaterialCfg(
+                static_friction=0.8,
+                dynamic_friction=0.5,
+                restitution=0.0,  # NO BOUNCING
+                friction_combine_mode="max",
+                restitution_combine_mode="min",
+            ),
         ),
         init_state=RigidObjectCfg.InitialStateCfg(
-            # Position: EE at ~(0.1, 0, 0.5), saw extends 0.7m, so log at 0.9m+ to avoid collision
-            pos=(1.0, 0.0, 0.4),  # 1m in front, at sawing height
+            # Position: Move log closer to robot so saw can reach it
+            # Saw is at X~0.2-0.3, so place log at X=0.45 (gives ~0.2m gap for blade)
+            pos=(0.45, 0.0, 0.4),  # Moved from X=1.0 to X=0.45
             rot=(
                 0.707,
                 0.0,
@@ -331,6 +376,28 @@ def main():
     # --- NEW: ADD CAMERA TO SCENE ---
     add_camera_to_scene(scene_cfg)
     # --- END CAMERA ADDITION ---
+
+    # --- FRAME CALIBRATION: Add FrameTransformer for TCP visualization ---
+    # This visualizes the tool center point (TCP) offset for calibration
+    scene_cfg.ee_frame = FrameTransformerCfg(
+        prim_path="{ENV_REGEX_NS}/Robot/panda_link0",
+        debug_vis=True,  # Show RGB axes in viewport
+        target_frames=[
+            FrameTransformerCfg.FrameCfg(
+                prim_path="{ENV_REGEX_NS}/Robot/panda_hand",
+                name="ee_tcp",
+                offset=OffsetCfg(
+                    # TCP offset from panda_hand to saw blade center
+                    # Saw is 0.7m long, attached at handle (one end)
+                    # Blade center is ~0.35m from attachment point
+                    pos=(0.35, 0.0, 0.0),
+                    # Match saw rotation: RotX(-90°)
+                    rot=(0.707107, -0.707107, 0.0, 0.0),
+                ),
+            ),
+        ],
+    )
+    # --- END FRAME CALIBRATION ---
 
     scene = InteractiveScene(scene_cfg)
     sim.reset()
@@ -393,17 +460,33 @@ def main():
     # Get the flat list of joint indices for the first environment (env 0)
     arm_joint_ids = arm_joint_ids_list[0]
 
-    # --- Use stable "Idle" values from Plan Table 1 ---
-    default_stiffness_tuple = (5000.0, 5000.0, 5000.0, 500.0, 500.0, 500.0)
-    default_damping_ratio_tuple = (1.0, 1.0, 1.0, 1.0, 1.0, 1.0)
+    # --- OSC CONFIGURATION: Anisotropic Stiffness per Technical Report ---
+    # Key insight: Different stiffness per axis to prevent tilt while allowing keyboard control
+    # Translational: [X, Y, Z] - Medium X/Y for keyboard motion, Low Z for resting
+    # Rotational: [Roll, Pitch, Yaw] - VERY HIGH to overcome attachment torques
+    default_stiffness_tuple = (
+        100.0,
+        100.0,
+        10.0,
+        1000.0,
+        1000.0,
+        1000.0,
+    )  # Increased rotation from 150 to 1000
+
+    # High damping (>1.0) critical for contact stability - prevents oscillation
+    # Even higher on rotation (4.0) to aggressively dampen any tilting motion
+    default_damping_ratio_tuple = (2.0, 2.0, 2.0, 4.0, 4.0, 4.0)
 
     osc_cfg = OperationalSpaceControllerCfg(
         target_types=["pose_abs"],
         impedance_mode="variable_kp",
         inertial_dynamics_decoupling=True,
+        gravity_compensation=True,  # Ensure arm weight doesn't bias contact
         nullspace_control="position",
         motion_stiffness_task=default_stiffness_tuple,
         motion_damping_ratio_task=default_damping_ratio_tuple,
+        # NOTE: body_offset not supported in this OSC version
+        # Using FrameTransformer for TCP visualization instead
     )
 
     osc = OperationalSpaceController(osc_cfg, scene.num_envs, sim.device)
@@ -474,9 +557,9 @@ def main():
             # --- END HRI CONTROL LOOP ---
 
             # --- MODIFIED ---
-            # Since we are always attached, we are always compliant.
-            # Set OSC target to its *current* pose.
-            target_ee_pose_b = initial_ee_pose_b.clone()
+            # Revert to compliant mode - fixed targets don't work with attachment
+            # The attachment constraint makes many orientations physically unreachable
+            target_ee_pose_b = ee_pose_b.clone()
             # --- END MODIFIED ---
 
             # Action dim = 7 (pose) + 6 (stiffness) = 13
@@ -502,9 +585,58 @@ def main():
                 save_camera_image(camera, frame_count)
             frame_count += 1
 
-            # Debug output every 30 frames
+            # --- COMPREHENSIVE DEBUG OUTPUT (EVERY FRAME) ---
+            if True:  # Always print for debugging
+                # Calculate orientation error (quaternion difference)
+                from isaaclab.utils.math import quat_error_magnitude
+
+                # Target vs Actual EE
+                ee_quat_error = quat_error_magnitude(
+                    target_ee_pose_b[:, 3:7], ee_pose_b[:, 3:7]
+                )
+                ee_pos_error = torch.norm(
+                    target_ee_pose_b[:, :3] - ee_pose_b[:, :3], dim=-1
+                )
+
+                # Saw pose
+                saw_pos_w = saw.data.root_pos_w[0]
+                saw_quat_w = saw.data.root_quat_w[0]
+
+                # Log pose
+                log_pos_w = log.data.root_pos_w[0]
+                log_quat_w = log.data.root_quat_w[0]
+
+                # Applied force
+                force_magnitude = torch.norm(force_world[0])
+
+                print(f"\n========== FRAME {frame_count} DEBUG ==========")
+                print("TARGET EE:")
+                print(f"  Pos: {target_ee_pose_b[0, :3].cpu().numpy()}")
+                print(f"  Quat: {target_ee_pose_b[0, 3:7].cpu().numpy()}")
+                print("\nACTUAL EE:")
+                print(f"  Pos: {ee_pose_b[0, :3].cpu().numpy()}")
+                print(f"  Quat: {ee_pose_b[0, 3:7].cpu().numpy()}")
+                print("\nEE ERROR:")
+                print(f"  Position Error: {ee_pos_error[0].item():.4f} m")
+                print(f"  Orientation Error: {ee_quat_error[0].item():.4f} rad")
+                print("\nSAW STATE:")
+                print(f"  Pos (World): {saw_pos_w.cpu().numpy()}")
+                print(f"  Quat (World): {saw_quat_w.cpu().numpy()}")
+                print("\nLOG STATE:")
+                print(f"  Pos (World): {log_pos_w.cpu().numpy()}")
+                print(f"  Quat (World): {log_quat_w.cpu().numpy()}")
+                print("\nFORCES APPLIED:")
+                print(
+                    f"  Human Force (World): {force_world[0].cpu().numpy()} ({force_magnitude.item():.2f}N)"
+                )
+                print("\nSTIFFNESS:")
+                print(f"  Translational: {current_stiffness[0, :3].cpu().numpy()}")
+                print(f"  Rotational: {current_stiffness[0, 3:].cpu().numpy()}")
+                print(f"{'='*50}")
+
+            # Old debug output (keep for compatibility)
             if frame_count % 30 == 0:
-                print(f"[DEBUG] Frame {frame_count} - Loop running...")
+                pass  # Comprehensive output above replaces this
 
         print("[DEBUG] Exited simulation loop normally")
 
