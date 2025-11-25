@@ -2,8 +2,8 @@
 This is the final, working baseline script for Isaac Lab v2.3.0.
 It successfully controls the Franka arm's end-effector with an OSC.
 
--- MODIFIED VERSION (v13 - Camera Added) --
-This script adds minimal camera functionality to capture RGB frames.
+-- MODIFIED VERSION (v14 - Shared Memory Buffer) --
+This script captures camera frames and writes to shared memory buffer.
 
 Command to run this script simulation : 
 1) cd /workspace
@@ -13,13 +13,8 @@ Command to run this script simulation :
 
 import argparse
 from isaaclab.app import AppLauncher
-import copy
-import torch
-import numpy as np
-from PIL import Image
-import os
 
-# Boilerplate
+# Boilerplate - Parse args and create SimulationApp FIRST
 parser = argparse.ArgumentParser(description="A working baseline for the Operational Space Controller.")
 parser.add_argument("--num_envs", type=int, default=1, help="Number of environments to spawn.")
 AppLauncher.add_app_launcher_args(parser)
@@ -28,7 +23,14 @@ args_cli = parser.parse_args()
 app_launcher = AppLauncher(args_cli)
 simulation_app = app_launcher.app
 
-# --- MOVED IMPORT TO TOP ---
+# --- NOW import everything else AFTER SimulationApp ---
+import copy
+import torch
+import numpy as np
+from PIL import Image
+import os
+from shared_buffer import SharedImageBuffer
+
 from isaaclab.sim import SimulationCfg, SimulationContext
 import isaaclab.sim as sim_utils
 from isaaclab.scene import InteractiveScene, InteractiveSceneCfg
@@ -173,9 +175,46 @@ def update_states(robot: Articulation, ee_frame_idx: int, arm_joint_ids: list[in
 # --- END MODIFIED update_states ---
 
 
-# --- NEW: MINIMAL CAMERA SAVE FUNCTION ---
+# --- CAMERA FUNCTIONS: Shared Memory + Disk Fallback ---
+def write_camera_to_buffer(camera: Camera, shared_buffer: SharedImageBuffer, frame_count: int) -> bool:
+    """Write camera frame to shared memory buffer"""
+    try:
+        # Check camera data availability
+        if not hasattr(camera.data, 'output') or "rgb" not in camera.data.output:
+            return False
+            
+        # Get raw RGB data [num_envs, H, W, 3 or 4]
+        rgb_data = camera.data.output["rgb"]
+        if rgb_data is None:
+            return False
+        
+        # Extract first environment, convert to numpy
+        rgb_np = rgb_data[0].cpu().numpy()
+        
+        # Handle data type: Isaac Lab outputs float32 in [0, 1] range
+        if rgb_np.dtype in (np.float32, np.float64):
+            rgb_np = (np.clip(rgb_np, 0, 1) * 255).astype(np.uint8)
+        
+        # Drop alpha if present
+        if rgb_np.shape[2] == 4:
+            rgb_np = rgb_np[:, :, :3]
+        
+        # Write to shared memory buffer
+        success = shared_buffer.write(rgb_np)
+        
+        if success:
+            stats = shared_buffer.get_stats()
+            print(f"[Camera→Buffer] Frame {frame_count} → Buffer #{stats['frame_count']}")
+        
+        return success
+        
+    except Exception as e:
+        print(f"[Camera→Buffer Error] Frame {frame_count}: {e}")
+        return False
+
+
 def save_camera_image(camera: Camera, frame_count: int, save_dir: str = "./camera_output"):
-    """Minimal camera capture function - saves RGB as-is from Isaac Lab"""
+    """Disk-based camera save (fallback/debugging)"""
     try:
         os.makedirs(save_dir, exist_ok=True)
         
@@ -204,13 +243,13 @@ def save_camera_image(camera: Camera, frame_count: int, save_dir: str = "./camer
         filepath = os.path.join(save_dir, f"frame_{frame_count:06d}.png")
         pil_image.save(filepath)
         
-        print(f"[Camera] Saved frame {frame_count}")
+        print(f"[Camera→Disk] Saved frame {frame_count}")
         return filepath
         
     except Exception as e:
         print(f"[Camera Error] Frame {frame_count}: {e}")
         return None
-# --- END CAMERA SAVE FUNCTION ---
+# --- END CAMERA FUNCTIONS ---
 
 
 def main():
@@ -274,7 +313,19 @@ def main():
     sim.reset()
     robot = scene["robot"]
     saw = scene["saw"]
-    camera = scene["camera"]  # NEW: Get camera reference
+    camera = scene["camera"]
+    
+    # --- Initialize Shared Memory Buffer ---
+    shared_buffer = SharedImageBuffer(
+        name="hri_camera_buffer",
+        buffer_size=10,
+        height=480,
+        width=640,
+        channels=3,
+        create=True
+    )
+    print(f"[SharedBuffer] Initialized for camera→VLA communication")
+    # --- End Buffer Init ---
 
     attachment_helper = AttachmentHelper(sim, env_idx=0)
 
@@ -363,13 +414,19 @@ def main():
             robot.set_joint_effort_target(joint_efforts, joint_ids=arm_joint_ids)
             robot.write_data_to_sim()
             
-            # --- NEW: Camera capture logic ---
+            # --- Camera capture: Write to shared memory buffer ---
             if frame_count % capture_every == 0:
-                save_camera_image(camera, frame_count)
+                write_camera_to_buffer(camera, shared_buffer, frame_count)
             frame_count += 1
             # --- END CAMERA CAPTURE ---
             
     finally:
+        # Clean up shared memory buffer
+        if 'shared_buffer' in locals():
+            print("[SharedBuffer] Cleaning up...")
+            shared_buffer.close()
+            shared_buffer.unlink()
+        
         if 'carb_input' in locals() and 'keyboard_sub' in locals() and keyboard_sub is not None:
             carb_input.unsubscribe_to_keyboard_events(app_window.get_keyboard(), keyboard_sub)
         
