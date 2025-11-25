@@ -89,6 +89,18 @@ g_downward_force_applied = 0.0  # Current applied force (smoothed)
 MAX_DOWNWARD_FORCE = 50.0  # N (Section 6.3)
 FORCE_RAMP_RATE = 1.0  # N per simulation step (Section 6.3 - prevents instability)
 
+# Y-AXIS TRAVERSAL: Material Zone Navigation (LEFT/RIGHT across zones)
+g_target_y_position = 0.0  # Starts at center (knot zone at Y=0.0)
+Y_MOVE_INCREMENT = 0.05  # 5cm per arrow key press
+Y_MIN_LIMIT = -0.40  # Left boundary (extended to allow more reach)
+Y_MAX_LIMIT = 0.40  # Right boundary (extended)
+
+# Z-AXIS CONTROL: Manual Height Adjustment (UP/DOWN)
+g_target_z_position = 0.53  # Default height (resting on log)
+Z_MOVE_INCREMENT = 0.02  # 2cm per arrow key press
+Z_MIN_LIMIT = 0.45  # Don't go too low (collision)
+Z_MAX_LIMIT = 0.70  # Don't go too high (reach limit)
+
 
 # --- NEW ATTACHMENT HELPER CLASS (v12) ---
 class AttachmentHelper:
@@ -195,8 +207,8 @@ class AttachmentHelper:
 
 # --- KEYBOARD HANDLER (IMPLEMENTATION PLAN SECTION 6.1) ---
 def _on_keyboard_event(event, saw_object: RigidObject):
-    """Callback to apply force to the saw object"""
-    global g_human_saw_force_cmd_ee, g_force_magnitude, g_downward_force_target
+    """Callback to apply force to the saw object and control Y/Z position"""
+    global g_human_saw_force_cmd_ee, g_force_magnitude, g_downward_force_target, g_target_y_position, g_target_z_position
 
     if event.type in (
         carb.input.KeyboardEventType.KEY_PRESS,
@@ -212,6 +224,30 @@ def _on_keyboard_event(event, saw_object: RigidObject):
             # IMPLEMENTATION PLAN: Downward cutting force (Section 6.1)
             # Press 'F' to apply downward pressure for cutting
             g_downward_force_target = MAX_DOWNWARD_FORCE
+        elif event.input == carb.input.KeyboardInput.LEFT:
+            # Y-AXIS TRAVERSAL: Move left (decrease Y)
+            g_target_y_position = max(
+                Y_MIN_LIMIT, g_target_y_position - Y_MOVE_INCREMENT
+            )
+            print(f"[Y-Traverse] Target Y: {g_target_y_position:.3f}m")
+        elif event.input == carb.input.KeyboardInput.RIGHT:
+            # Y-AXIS TRAVERSAL: Move right (increase Y)
+            g_target_y_position = min(
+                Y_MAX_LIMIT, g_target_y_position + Y_MOVE_INCREMENT
+            )
+            print(f"[Y-Traverse] Target Y: {g_target_y_position:.3f}m")
+        elif event.input == carb.input.KeyboardInput.UP:
+            # Z-AXIS CONTROL: Move up (increase Z)
+            g_target_z_position = min(
+                Z_MAX_LIMIT, g_target_z_position + Z_MOVE_INCREMENT
+            )
+            print(f"[Z-Control] Target Z: {g_target_z_position:.3f}m")
+        elif event.input == carb.input.KeyboardInput.DOWN:
+            # Z-AXIS CONTROL: Move down (decrease Z)
+            g_target_z_position = max(
+                Z_MIN_LIMIT, g_target_z_position - Z_MOVE_INCREMENT
+            )
+            print(f"[Z-Control] Target Z: {g_target_z_position:.3f}m")
         elif event.input == carb.input.KeyboardInput.U:
             # Increase force magnitude
             g_force_magnitude += 5.0
@@ -715,9 +751,10 @@ def main():
 
             # Target Position:
             # Log Center = [0.45, 0.0, 0.4]
-            # We want to be above the log center
-            target_ee_pose_b[:, 0] = 0.45  # Align X with log
-            target_ee_pose_b[:, 1] = 0.0  # Align Y with log
+            # Zones: soft(Y=-0.25), knot(Y=0.0), crack(Y=0.25)
+            target_ee_pose_b[:, 0] = 0.45  # Fixed X (aligned with log)
+            # Y-AXIS TRAVERSAL: Use global target position (controlled by LEFT/RIGHT arrows)
+            target_ee_pose_b[:, 1] = g_target_y_position
 
             # Target Z Calculation:
             # Saw Center at 0.0 (Attachment)
@@ -733,7 +770,8 @@ def main():
             # We want Bottom Edge at 0.5m -> Center at 0.55m
             # User wants it to "rest straight". Let's lower slightly to 0.53m
             # to ensure it sits firmly and flat.
-            target_ee_pose_b[:, 2] = 0.53
+            # Z-AXIS CONTROL: Use global target position (controlled by UP/DOWN arrows)
+            target_ee_pose_b[:, 2] = g_target_z_position
 
             # Debug output
             if frame_count % 10 == 0:
