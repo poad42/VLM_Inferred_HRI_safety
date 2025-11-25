@@ -1,0 +1,3 @@
+from isaaclab_assets import FRANKA_PANDA_HIGH_PD_CFG
+
+print(FRANKA_PANDA_HIGH_PD_CFG.spawn.usd_path)
