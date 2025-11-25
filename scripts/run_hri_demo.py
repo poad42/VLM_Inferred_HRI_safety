@@ -77,9 +77,17 @@ from camera_utils import add_camera_to_scene, save_camera_image
 
 # --- END NEW IMPORTS ---
 
-# --- KEYBOARD IMPL (MODIFIED) ---
-g_human_saw_force_cmd_ee = torch.zeros(1, 3)  # Force in EE frame [fx, fy, fz]
+# --- KEYBOARD IMPL (IMPLEMENTATION PLAN SECTION 6) ---
+# Force command in EE frame [fx, fy, fz]
+g_human_saw_force_cmd_ee = torch.zeros(1, 3)
 g_force_magnitude = 5.0  # N (start with lower force to avoid breaking joint)
+
+# IMPLEMENTATION PLAN FIX: Force ramping for downward pressure (Section 6.3)
+# Variables for smooth force application (slew rate limiter)
+g_downward_force_target = 0.0  # Target downward force (Z-axis)
+g_downward_force_applied = 0.0  # Current applied force (smoothed)
+MAX_DOWNWARD_FORCE = 50.0  # N (Section 6.3)
+FORCE_RAMP_RATE = 1.0  # N per simulation step (Section 6.3 - prevents instability)
 
 
 # --- NEW ATTACHMENT HELPER CLASS (v12) ---
@@ -127,15 +135,20 @@ class AttachmentHelper:
         )
         saw_prim_path = f"/World/envs/env_{env_idx}/Saw"
 
-        # This attaches to the Tool Center Point (TCP), 10.7cm "out" from the wrist
+        # IMPLEMENTATION PLAN FIX: Updated TCP offset and rotation
+        # TCP offset: 0.107m out from wrist (standard Franka TCP)
         local_pos_ee = Gf.Vec3f(0.0, 0.0, 0.107)
         local_rot_ee = Gf.Quatf(1.0, 0.0, 0.0, 0.0)
 
-        # This addresses the "one end of the saw" request.
-        # Assumes the saw is 0.7 long, so -0.35 is one end.
-        local_pos_saw = Gf.Vec3f(-0.35, 0.0, 0.0)
-        # This is a 90-degree rotation around the Y-axis (w, x, y, z)
-        local_rot_saw = Gf.Quatf(0.707, 0.0, 0.707, 0.0)
+        # IMPLEMENTATION PLAN FIX: Saw attachment point and rotation
+        # Position offset from saw origin to attachment point
+        # For vertical blade alignment with robot grasp
+        # Attachment: Center of the saw (0.0, 0.0, 0.0)
+        # This reduces the required reach height and improves stability
+        local_pos_saw = Gf.Vec3f(0.0, 0.0, 0.0)
+        # Rotation: -90° around X-axis (w, x, y, z) for Horizontal Knife orientation
+        # This aligns Length (X) Horizontal and Width (Y) Vertical
+        local_rot_saw = Gf.Quatf(0.707, -0.707, 0.0, 0.0)
 
         try:
             # --- API FIX (v11) ---
@@ -180,10 +193,10 @@ class AttachmentHelper:
 # --- END NEW ATTACHMENT HELPER CLASS ---
 
 
-# --- MODIFIED KEYBOARD HANDLER ---
+# --- KEYBOARD HANDLER (IMPLEMENTATION PLAN SECTION 6.1) ---
 def _on_keyboard_event(event, saw_object: RigidObject):
     """Callback to apply force to the saw object"""
-    global g_human_saw_force_cmd_ee, g_force_magnitude
+    global g_human_saw_force_cmd_ee, g_force_magnitude, g_downward_force_target
 
     if event.type in (
         carb.input.KeyboardEventType.KEY_PRESS,
@@ -195,6 +208,10 @@ def _on_keyboard_event(event, saw_object: RigidObject):
         elif event.input == carb.input.KeyboardInput.J:
             # "Push" saw (- X direction in EE frame = along saw length)
             g_human_saw_force_cmd_ee[0, 0] = -g_force_magnitude
+        elif event.input == carb.input.KeyboardInput.F:
+            # IMPLEMENTATION PLAN: Downward cutting force (Section 6.1)
+            # Press 'F' to apply downward pressure for cutting
+            g_downward_force_target = MAX_DOWNWARD_FORCE
         elif event.input == carb.input.KeyboardInput.U:
             # Increase force magnitude
             g_force_magnitude += 5.0
@@ -204,15 +221,19 @@ def _on_keyboard_event(event, saw_object: RigidObject):
             g_force_magnitude = max(0.0, g_force_magnitude - 5.0)
             print(f"[Force Control] Decreased force to {g_force_magnitude:.1f} N")
         elif event.input == carb.input.KeyboardInput.R:
-            # Reset force magnitude to default
+            # Reset force magnitude to default (Section 6.1)
             g_force_magnitude = 5.0
+            g_downward_force_target = 0.0  # Also reset downward force
             print(f"[Force Control] Reset force to {g_force_magnitude:.1f} N")
         # --- REMOVED 'T' KEY ---
 
     elif event.type == carb.input.KeyboardEventType.KEY_RELEASE:
         if event.input in (carb.input.KeyboardInput.J, carb.input.KeyboardInput.K):
-            # Stop force
+            # Stop horizontal force
             g_human_saw_force_cmd_ee[0, 0] = 0.0
+        elif event.input == carb.input.KeyboardInput.F:
+            # IMPLEMENTATION PLAN: Release downward force (Section 6.1)
+            g_downward_force_target = 0.0
 
 
 # --- END MODIFIED KEYBOARD HANDLER ---
@@ -306,9 +327,12 @@ def main():
             visual_material=sim_utils.PreviewSurfaceCfg(
                 diffuse_color=(0.7, 0.7, 0.7), metallic=0.8
             ),
-            # PHYSICS FIX 1: Tuned rigid body properties
+            # PHYSICS FIX 1: Dynamic mode with negligible mass
+            mass_props=sim_utils.MassPropertiesCfg(
+                mass=0.001
+            ),  # Negligible mass to prevent sagging
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
-                kinematic_enabled=False,
+                kinematic_enabled=False,  # Dynamic to allow movement and force application
                 disable_gravity=True,
                 max_depenetration_velocity=0.1,  # Prevent explosive ejection
                 solver_position_iteration_count=12,  # Increase from default 4
@@ -432,11 +456,12 @@ def main():
     print(" Keyboard Handler Initialized...")
     print(" K:   'Pull' saw (+ X direction)")
     print(" J:   'Push' saw (- X direction)")
+    print(" F:   Apply downward cutting force (hold)")
     print(" U:   Increase force magnitude (+5 N)")
     print(" M:   Decrease force magnitude (-5 N)")
-    print(" R:   Reset force magnitude (5 N)")
+    print(" R:   Reset all forces to default")
     print(" T:   Toggle REMOVED. Attached by default.")
-    print(" Camera: Capturing every 30 frames")  # NEW
+    print(" Camera: Capturing every 30 frames")
     print("--------------------")
     # --- END MODIFIED ---
 
@@ -460,22 +485,35 @@ def main():
     # Get the flat list of joint indices for the first environment (env 0)
     arm_joint_ids = arm_joint_ids_list[0]
 
-    # --- OSC CONFIGURATION: Anisotropic Stiffness per Technical Report ---
-    # Key insight: Different stiffness per axis to prevent tilt while allowing keyboard control
-    # Translational: [X, Y, Z] - Medium X/Y for keyboard motion, Low Z for resting
-    # Rotational: [Roll, Pitch, Yaw] - VERY HIGH to overcome attachment torques
+    # --- OSC CONFIGURATION: IMPLEMENTATION PLAN VALUES ---
+    # Anisotropic stiffness for perpendicular orientation constraints (Table 2)
+    # Translational: [X, Y, Z]
+    #   - X/Y: 800.0 (high stiffness to track cutting line accurately)
+    #   - Z: 100.0 (low stiffness for force compliance with log surface)
+    # Rotational: [Roll, Pitch, Yaw]
+    #   - Roll/Pitch: 1500.0 (very high to prevent tilting - perpendicular constraint)
+    #   - Yaw: 600.0 (moderate to allow cut steering if needed)
     default_stiffness_tuple = (
-        100.0,
-        100.0,
-        10.0,
-        1000.0,
-        1000.0,
-        1000.0,
-    )  # Increased rotation from 150 to 1000
+        400.0,  # Translation X - reduced from 800 for stability
+        400.0,  # Translation Y - reduced from 800 for stability
+        200.0,  # Translation Z - increased from 100 to prevent sag
+        600.0,  # Rotation Roll - reduced from 1500 for stability
+        600.0,  # Rotation Pitch - reduced from 1500 for stability
+        400.0,  # Rotation Yaw - reduced from 600 for stability
+    )
 
-    # High damping (>1.0) critical for contact stability - prevents oscillation
-    # Even higher on rotation (4.0) to aggressively dampen any tilting motion
-    default_damping_ratio_tuple = (2.0, 2.0, 2.0, 4.0, 4.0, 4.0)
+    # Damping ratios per implementation plan (Section 5.2, Table 2)
+    # CRITICAL FIX: These are RATIOS, not absolute values!
+    # OSC formula: d_gains = 2 * sqrt(p_gains) * damping_ratio
+    # Lower damping on Z-axis for compliance, higher on rotations for stability
+    default_damping_ratio_tuple = (
+        1.0,  # Translation X - critically damped
+        1.0,  # Translation Y - critically damped
+        0.7,  # Translation Z - slightly underdamped for compliance
+        2.0,  # Rotation Roll - overdamped for stability
+        2.0,  # Rotation Pitch - overdamped for stability
+        1.0,  # Rotation Yaw
+    )
 
     osc_cfg = OperationalSpaceControllerCfg(
         target_types=["pose_abs"],
@@ -556,11 +594,148 @@ def main():
             )
             # --- END HRI CONTROL LOOP ---
 
-            # --- MODIFIED ---
-            # Revert to compliant mode - fixed targets don't work with attachment
-            # The attachment constraint makes many orientations physically unreachable
+            # --- IMPLEMENTATION PLAN: Hybrid Force/Position Control (Section 6.2, Option B) ---
+            # Apply force ramping (slew rate limiter - Section 6.3)
+            global g_downward_force_applied, g_downward_force_target
+            force_error = g_downward_force_target - g_downward_force_applied
+            # Clamp the change to prevent step-function instability
+            force_delta = max(min(force_error, FORCE_RAMP_RATE), -FORCE_RAMP_RATE)
+            g_downward_force_applied += force_delta
+
+            # Modulate target Z-position based on applied downward force
+            # This implements hybrid control: position control on X/Y, force control on Z
             target_ee_pose_b = ee_pose_b.clone()
-            # --- END MODIFIED ---
+
+            # --- VLM-READY SAW DESCENT ---
+            # Goal: Lower the saw blade to contact the log surface
+            # Challenge: Saw is rotated, so we need to find blade tip in world coords
+
+            # Get current saw state
+            saw_pos_w = saw.data.root_pos_w[0]  # Saw center of mass in world frame
+            saw_quat_w = saw.data.root_quat_w[0]  # [w, x, y, z] in world frame
+
+            # Saw geometry: 0.7m (length) x 0.1m (width) x 0.02m (thickness)
+            # In saw's local frame: blade extends along X-axis
+            # The blade TIP (cutting edge) is at (+0.35, 0, 0) in saw's local frame
+
+            # Transform blade tip offset through saw's rotation
+            # Convert quaternion to rotation matrix for transformation
+            from scipy.spatial.transform import Rotation as R
+
+            quat_scipy = [
+                saw_quat_w[1].item(),
+                saw_quat_w[2].item(),
+                saw_quat_w[3].item(),
+                saw_quat_w[0].item(),
+            ]  # Isaac (w,x,y,z) -> scipy (x,y,z,w)
+            saw_rotation = R.from_quat(quat_scipy)
+
+            # Blade tip offset in saw's local frame
+            # TESTING: Try opposite end since +0.35 gives blade 33cm below log
+            blade_tip_local = torch.tensor([-0.35, 0.0, 0.0], device=saw_pos_w.device)
+
+            # Transform to world frame
+            blade_tip_offset_world = torch.tensor(
+                saw_rotation.apply(blade_tip_local.cpu().numpy()),
+                device=saw_pos_w.device,
+                dtype=torch.float32,
+            )
+
+            # Blade tip position in world frame
+            blade_tip_world = saw_pos_w + blade_tip_offset_world
+            blade_tip_z = blade_tip_world[2]
+
+            # Log surface (top): Z = 0.4 (center) + 0.1 (half height) = 0.5m
+            log_surface_z = 0.5
+
+            # Gap between blade tip and log surface
+            gap_to_log = blade_tip_z - log_surface_z
+
+            # Apply proportional control to close the gap
+            descent_gain = 0.3  # More conservative: 30% per step for stability
+
+            # Debug output every 10 frames
+            if frame_count % 10 == 0:
+                print(f"\n--- SAW DESCENT DEBUG (Frame {frame_count}) ---")
+                print(f"Saw Center (World): {saw_pos_w.cpu().numpy()}")
+                print(f"Saw Quat (World): {saw_quat_w.cpu().numpy()}")
+                print(f"Blade Tip Local: {blade_tip_local.cpu().numpy()}")
+                print(
+                    f"Blade Tip Offset (World): {blade_tip_offset_world.cpu().numpy()}"
+                )
+                print(f"Blade Tip Z (World): {blade_tip_z:.4f}m")
+                print(f"Log Surface Z: {log_surface_z:.4f}m")
+                print(f"Gap to Log: {gap_to_log:.4f}m ({gap_to_log*1000:.1f}mm)")
+                if gap_to_log > 0.001:
+                    descent_cmd = gap_to_log * descent_gain
+                    print(
+                        f"Descent Command: {descent_cmd:.4f}m ({descent_cmd*1000:.1f}mm)"
+                    )
+                else:
+                    print("Descent Command: NONE (gap < 1mm, contact achieved)")
+
+            # --- KINEMATIC SAW CONTROL ---
+            # Strategy: Direct Position/Orientation Command
+            # 1. Force EE orientation to standard top-down (180 deg X-axis rotation)
+            # 2. Command EE Z to place saw on log
+            # 3. Keep X/Y aligned with log
+
+            # Restore stable stiffness
+            # Increase rotational stiffness to force "straight" alignment
+            current_stiffness[:, 2] = 200.0
+            current_stiffness[:, 3:] = 1500.0
+
+            # Target Orientation: [0, 1, 0, 0] (w, x, y, z) -> 180 deg around X
+            # This points the gripper Z-axis DOWN
+            target_ee_pose_b[:, 3] = 0.0
+            target_ee_pose_b[:, 4] = 1.0
+            target_ee_pose_b[:, 5] = 0.0
+            target_ee_pose_b[:, 6] = 0.0
+
+            # Target Position:
+            # Log Center = [0.45, 0.0, 0.4]
+            # We want to be above the log center
+            target_ee_pose_b[:, 0] = 0.45  # Align X with log
+            target_ee_pose_b[:, 1] = 0.0  # Align Y with log
+
+            # Target Z Calculation:
+            # Saw Center at 0.0 (Attachment)
+            # Log Top = 0.5m
+            # Blade Length = 0.35m (Half-length)
+            # If vertical, Tip is at Center - 0.35m
+            # We want Tip at 0.5m -> Center at 0.85m
+            # EE Offset is approx 0.24m -> EE Z = 1.09m
+            # Target Z Calculation:
+            # Saw Center at 0.0 (Attachment)
+            # Log Top = 0.5m
+            # Saw Width = 0.1m (Vertical dimension now) -> Half-Width = 0.05m
+            # We want Bottom Edge at 0.5m -> Center at 0.55m
+            # User wants it to "rest straight". Let's lower slightly to 0.53m
+            # to ensure it sits firmly and flat.
+            target_ee_pose_b[:, 2] = 0.53
+
+            # Debug output
+            if frame_count % 10 == 0:
+                print(f"\n--- KINEMATIC SAW DEBUG (Frame {frame_count}) ---")
+                print(f"Target EE: {target_ee_pose_b[0, :3].cpu().numpy()}")
+                print(f"Target Quat: {target_ee_pose_b[0, 3:].cpu().numpy()}")
+                print(f"Actual EE: {ee_pose_b[0, :3].cpu().numpy()}")
+                print(f"Saw Center: {saw_pos_w.cpu().numpy()}")
+
+                # Calculate Attachment Error (Distance between EE and Saw Center)
+                dist = torch.norm(saw_pos_w - ee_pose_b[0, :3])
+                print(f"Attachment Dist (Joint Error): {dist:.4f}m")
+
+                # Print Saw Orientation (Euler) to verify vertical
+                saw_euler = R.from_quat(saw_quat_w.cpu().numpy()).as_euler(
+                    "xyz", degrees=True
+                )
+                print(f"Saw Euler (deg): {saw_euler}")
+
+            # Z-compliance shift: 5mm per 1N (tuning parameter from Section 6.2)
+            # This creates a "virtual spring" that generates force proportional to displacement
+            z_compliance_shift = g_downward_force_applied * 0.005  # 5mm/N
+            target_ee_pose_b[:, 2] -= z_compliance_shift  # Lower Z target
 
             # Action dim = 7 (pose) + 6 (stiffness) = 13
             command = torch.cat([target_ee_pose_b, current_stiffness], dim=1)
