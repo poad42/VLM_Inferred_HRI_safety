@@ -356,44 +356,65 @@ def main():
         ),
     )
 
-    # Add the "log" object (box shape for simplicity)
-    scene_cfg.log = RigidObjectCfg(
-        prim_path="{ENV_REGEX_NS}/Log",
+    # ==============================================================================
+    # MULTI-ZONE LOG FOR VLM MATERIAL DETECTION
+    # ==============================================================================
+    # Zone 1: Soft Wood (Light tan)
+    scene_cfg.log_soft = RigidObjectCfg(
+        prim_path="{ENV_REGEX_NS}/LogSoft",
         spawn=sim_utils.CuboidCfg(
-            size=(0.8, 0.2, 0.2),  # 80cm long, 20cm x 20cm cross-section
-            visual_material=sim_utils.PreviewSurfaceCfg(
-                diffuse_color=(0.6, 0.4, 0.2),  # Brown wood color
-            ),
-            # PHYSICS FIX: Same tuned properties as saw
+            size=(0.30, 0.15, 0.15),
+            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.7, 0.5, 0.3)),
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
-                kinematic_enabled=True,  # Static log
-                disable_gravity=False,
-                max_depenetration_velocity=0.1,
-                solver_position_iteration_count=12,
-                solver_velocity_iteration_count=4,
+                kinematic_enabled=True, disable_gravity=False
             ),
-            collision_props=sim_utils.CollisionPropertiesCfg(
-                collision_enabled=True,
-            ),
-            # PHYSICS FIX: Matching material for stable contact
+            collision_props=sim_utils.CollisionPropertiesCfg(collision_enabled=True),
             physics_material=sim_utils.RigidBodyMaterialCfg(
-                static_friction=0.8,
-                dynamic_friction=0.5,
-                restitution=0.0,  # NO BOUNCING
-                friction_combine_mode="max",
-                restitution_combine_mode="min",
+                static_friction=0.3, dynamic_friction=0.2, restitution=0.0
             ),
         ),
         init_state=RigidObjectCfg.InitialStateCfg(
-            # Position: Move log closer to robot so saw can reach it
-            # Saw is at X~0.2-0.3, so place log at X=0.45 (gives ~0.2m gap for blade)
-            pos=(0.45, 0.0, 0.4),  # Moved from X=1.0 to X=0.45
-            rot=(
-                0.707,
-                0.0,
-                0.0,
-                0.707,
-            ),  # 90° rotation around Z-axis (longer side parallel to robot)
+            pos=(0.45, -0.25, 0.4), rot=(0.707, 0.0, 0.0, 0.707)
+        ),
+    )
+
+    # Zone 2: Hard Knot (Dark brown)
+    scene_cfg.log_knot = RigidObjectCfg(
+        prim_path="{ENV_REGEX_NS}/LogKnot",
+        spawn=sim_utils.CuboidCfg(
+            size=(0.20, 0.15, 0.15),
+            visual_material=sim_utils.PreviewSurfaceCfg(
+                diffuse_color=(0.4, 0.25, 0.15)
+            ),
+            rigid_props=sim_utils.RigidBodyPropertiesCfg(
+                kinematic_enabled=True, disable_gravity=False
+            ),
+            collision_props=sim_utils.CollisionPropertiesCfg(collision_enabled=True),
+            physics_material=sim_utils.RigidBodyMaterialCfg(
+                static_friction=0.9, dynamic_friction=0.7, restitution=0.0
+            ),
+        ),
+        init_state=RigidObjectCfg.InitialStateCfg(
+            pos=(0.45, 0.0, 0.4), rot=(0.707, 0.0, 0.0, 0.707)
+        ),
+    )
+
+    # Zone 3: Cracked (Medium brown)
+    scene_cfg.log_crack = RigidObjectCfg(
+        prim_path="{ENV_REGEX_NS}/LogCrack",
+        spawn=sim_utils.CuboidCfg(
+            size=(0.30, 0.15, 0.15),
+            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.6, 0.4, 0.2)),
+            rigid_props=sim_utils.RigidBodyPropertiesCfg(
+                kinematic_enabled=True, disable_gravity=False
+            ),
+            collision_props=sim_utils.CollisionPropertiesCfg(collision_enabled=True),
+            physics_material=sim_utils.RigidBodyMaterialCfg(
+                static_friction=0.2, dynamic_friction=0.1, restitution=0.0
+            ),
+        ),
+        init_state=RigidObjectCfg.InitialStateCfg(
+            pos=(0.45, 0.25, 0.4), rot=(0.707, 0.0, 0.0, 0.707)
         ),
     )
 
@@ -427,7 +448,7 @@ def main():
     sim.reset()
     robot = scene["robot"]
     saw = scene["saw"]
-    log = scene["log"]
+    log = scene["log_knot"]  # Use middle zone (knot) as primary log reference
     camera = scene["camera"]  # NEW: Get camera reference
 
     # --- MODIFIED (v12) ---
