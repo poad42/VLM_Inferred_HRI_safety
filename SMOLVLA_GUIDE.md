@@ -168,11 +168,56 @@ SmolVLA Worker - Real-time Safety Inference
 - ❌ Never use `isaaclab.sh` for Terminal 2
 - ❌ Never install LeRobot in Isaac Sim's Python
 
-### Why This is Safe
+### 🚨 CRITICAL: Avoiding Isaac Sim Corruption
+
+**The Problem**: Installing LeRobot or other packages into Isaac Sim's Python environment will corrupt PyTorch and break Isaac Sim.
+
+**Symptoms of corruption**:
+```
+FileNotFoundError: /isaac-sim/exts/omni.isaac.ml_archive/pip_prebundle/torch/_vendor/packaging/_structures.py
+Error importing isaacsim.core.nodes extension
+Extension isaaclab_tasks failed to load
+```
+
+**How to prevent this**:
+
+1. **NEVER activate conda in Terminal 1**
+   ```bash
+   # ❌ WRONG - DO NOT DO THIS
+   conda activate lerobot
+   ./isaaclab/isaaclab.sh -p camera_hri_demo.py
+   
+   # ✅ CORRECT - Deactivate conda first
+   conda deactivate
+   ./isaaclab/isaaclab.sh -p camera_hri_demo.py
+   ```
+
+2. **NEVER install packages in Isaac Sim's Python**
+   ```bash
+   # ❌ WRONG - DO NOT DO THIS
+   pip install lerobot
+   python -m pip install lerobot
+   
+   # ✅ CORRECT - Use full path to conda Python
+   /isaac-sim/miniforge3/envs/lerobot/bin/python -m pip install lerobot
+   ```
+
+3. **Keep environments completely separate**
+   - Terminal 1: No conda, only `isaaclab.sh`
+   - Terminal 2: Conda `lerobot` environment only
+   - Communication: Shared memory only (no Python imports between them)
+
+**If corruption happens**:
+- **Solution**: Restart your Brev container to get a fresh Isaac Sim installation
+- **After restart**: The `lerobot` conda environment persists (stored in `/workspace`), so you don't need to reinstall anything
+- **Verify after restart**: Run `conda env list` to confirm `lerobot` still exists
+
+**Why This is Safe**
 
 - **Physical separation**: Isaac Sim and LeRobot in different Python environments
 - **No conflicts**: They communicate via shared memory (RAM), not Python packages
 - **Isaac Sim untouched**: Conda environment never modifies Isaac Sim files
+- **Persistent storage**: Conda environments and your code survive container restarts
 
 ---
 
