@@ -47,7 +47,7 @@ class SharedImageBuffer:
     """
     
     METADATA_SIZE = 64  # bytes
-    METADATA_FORMAT = "IQQ44x"  # write_idx(I), frame_count(Q), timestamp_ns(Q), reserved(44x)
+    METADATA_FORMAT = "=IxxxxQQ40x"  # write_idx(I), padding(4x), frame_count(Q), timestamp_ns(Q), reserved(40x)
     
     def __init__(
         self,

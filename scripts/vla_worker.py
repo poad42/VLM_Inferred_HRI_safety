@@ -34,8 +34,8 @@ from pathlib import Path
 # Import shared buffer
 from shared_buffer import SharedImageBuffer
 
-# Import VLA inference (using simple placeholder for now)
-from test_vla import simple_vla_inference
+# Import simplified VLA model (no LeRobot dependency)
+from vla_simple import SimplifiedVLA
 
 
 class VLAWorker:
@@ -46,7 +46,8 @@ class VLAWorker:
     def __init__(
         self,
         buffer_name: str = "hri_camera_buffer",
-        safety_instruction: str = "Monitor human proximity and adjust robot stiffness for safe collaboration"
+        safety_instruction: str = "Monitor human proximity and adjust robot stiffness for safe collaboration",
+        device: str = "cuda"
     ):
         """
         Initialize VLA worker.
@@ -54,6 +55,7 @@ class VLAWorker:
         Args:
             buffer_name: Name of shared memory buffer (must match camera producer)
             safety_instruction: Safety instruction for VLA inference
+            device: 'cuda' or 'cpu' for model inference
         """
         self.buffer_name = buffer_name
         self.safety_instruction = safety_instruction
@@ -66,6 +68,10 @@ class VLAWorker:
         
         print(f"[VLAWorker] Initializing...")
         print(f"[VLAWorker] Safety instruction: '{safety_instruction}'")
+        
+        # Initialize VLA model
+        print(f"[VLAWorker] Loading VLA model on {device}...")
+        self.vla_model = SimplifiedVLA(device=device)
         
         # Attach to shared memory buffer
         print(f"[VLAWorker] Connecting to buffer '{buffer_name}'...")
@@ -103,17 +109,11 @@ class VLAWorker:
         Returns:
             Safety parameters dictionary
         """
-        start_time = time.time()
-        
-        # Run VLA inference (placeholder for now)
-        # In production, this would be real SmolVLA-450M inference
-        safety_params = simple_vla_inference(
-            image_np,  # Pass numpy array directly
-            self.safety_instruction
+        # Run SmolVLA inference
+        safety_params = self.vla_model.infer(
+            image_np,
+            instruction=self.safety_instruction
         )
-        
-        inference_time = time.time() - start_time
-        safety_params['inference_time'] = inference_time
         
         return safety_params
     
@@ -163,12 +163,15 @@ class VLAWorker:
                 
                 # Print results
                 print(f"[VLAWorker] Inference time: {safety_params['inference_time']:.3f}s")
+                print(f"[VLAWorker] Model: {safety_params.get('model_type', 'Unknown')}")
                 print(f"[VLAWorker] Safety Parameters:")
                 print(f"  Safety Score:   {safety_params['safety_score']:.2f}")
                 print(f"  Action:         {safety_params['action_command'].upper()}")
                 print(f"  Impedance XY:   {safety_params['impedance_xy']:.2f}")
                 print(f"  Impedance Z:    {safety_params['impedance_z']:.2f}")
                 print(f"  Force Limit:    {safety_params['force_limit']:.2f}")
+                if 'raw_output' in safety_params:
+                    print(f"  VLA Output:     {safety_params['raw_output'][:100]}...")
                 print("-" * 60)
                 
                 # Calculate average FPS
@@ -198,41 +201,6 @@ class VLAWorker:
         self.buffer.close()
 
 
-# Helper function for test_vla.py that accepts numpy array
-def simple_vla_inference_np(image_np: np.ndarray, safety_instruction: str) -> dict:
-    """
-    VLA inference directly from numpy array (no disk I/O).
-    """
-    # Placeholder safety parameters
-    # In production, this would be real SmolVLA-450M inference
-    safety_params = {
-        "impedance_xy": 0.65,
-        "impedance_z": 0.80,
-        "safety_score": 0.75,
-        "action_command": "continue",
-        "force_limit": 0.70,
-        "confidence": 0.85,
-        "model_type": "SimpleVLA-Placeholder"
-    }
-    
-    return safety_params
-
-
-# Monkey-patch test_vla to accept numpy arrays
-def simple_vla_inference(image_input, safety_instruction: str = "Assess robot safety") -> dict:
-    """
-    Wrapper that accepts both image paths and numpy arrays.
-    """
-    if isinstance(image_input, np.ndarray):
-        # Direct numpy array input (from shared memory)
-        return simple_vla_inference_np(image_input, safety_instruction)
-    else:
-        # Image path input (from disk) - original behavior
-        from PIL import Image
-        image = Image.open(image_input)
-        return simple_vla_inference_np(np.array(image), safety_instruction)
-
-
 def main():
     parser = argparse.ArgumentParser(
         description="VLA Worker - Process camera frames from shared memory"
@@ -255,13 +223,21 @@ def main():
         default="Monitor human proximity and adjust robot stiffness for safe collaboration",
         help="Safety instruction for VLA"
     )
+    parser.add_argument(
+        "--device",
+        type=str,
+        default="cuda",
+        choices=["cuda", "cpu"],
+        help="Device for VLA inference (default: cuda)"
+    )
     
     args = parser.parse_args()
     
     # Create and run worker
     worker = VLAWorker(
         buffer_name=args.buffer_name,
-        safety_instruction=args.instruction
+        safety_instruction=args.instruction,
+        device=args.device
     )
     
     worker.run(poll_interval=args.poll_interval)
