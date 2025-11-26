@@ -1,94 +1,79 @@
 #!/usr/bin/env python3
 """
-Octo-Base VLA for HRI Safety Assessment
-========================================
+SmolVLA for HRI Safety Assessment
+==================================
 
-Real-time vision-action model using UC Berkeley's Octo-Base (93M parameters).
-Trained on 800K robot trajectories from Open X-Embodiment dataset.
+Real-time vision-action model using LeRobot's SmolVLA (450M parameters).
+Built on SmolVLM2-500M backbone, fine-tuned for robot control.
 
-Performance: ~30-50ms inference on GPU
+Performance: ~50-100ms inference on GPU
 
-NOTE: This implementation is compatible with Octo v1.0+ API
-If you get errors, check: https://github.com/octo-models/octo
+Model: https://huggingface.co/lerobot/smolvla_base
 """
 
 import numpy as np
 from PIL import Image
 from typing import Dict, Union
 import time
+import torch
 
 
-class OctoVLA:
+class SmolVLA:
     """
-    Octo-Base VLA (93M parameters) for real-time safety inference.
+    SmolVLA (450M parameters) for real-time safety inference.
     
-    Model: UC Berkeley's Octo-Base
-    Training: 800K robot trajectories, diverse embodiments
+    Model: LeRobot's SmolVLA Base
+    Training: Robot manipulation tasks with vision-language grounding
     Output: 7-DOF actions → safety parameters
     """
     
     def __init__(self, device: str = "cuda"):
-        """Initialize Octo-Base model."""
+        """Initialize SmolVLA model."""
         self.device = device
         self.model_loaded = False
         
-        print(f"[OctoVLA] Initializing Octo-Base (93M parameters)")
-        print(f"[OctoVLA] Device: {device}")
+        print(f"[SmolVLA] Initializing SmolVLA (450M parameters)")
+        print(f"[SmolVLA] Device: {device}")
         
         try:
-            # Try importing Octo
-            from octo.model.octo_model import OctoModel
-            import jax
+            # Import LeRobot SmolVLA
+            from lerobot.policies.smolvla.modeling_smolvla import SmolVLAPolicy
+            from lerobot.policies.factory import make_pre_post_processors
             
-            print(f"[OctoVLA] Loading pre-trained model from HuggingFace...")
-            print(f"[OctoVLA] This may take a few minutes on first run (downloads ~400MB)...")
+            print(f"[SmolVLA] Loading pre-trained model from HuggingFace...")
+            print(f"[SmolVLA] Model: lerobot/smolvla_base (~2GB download on first run)...")
             
-            # Try multiple model names (API may vary)
-            model_names = [
-                "hf://rail-berkeley/octo-base-1.5",
-                "hf://rail-berkeley/octo-base",
-                "octo-base-1.5",
-                "octo-base"
-            ]
+            # Load SmolVLA model
+            self.model = SmolVLAPolicy.from_pretrained("lerobot/smolvla_base")
+            self.model = self.model.to(device)
+            self.model.eval()
             
-            model_loaded_success = False
-            for model_name in model_names:
-                try:
-                    print(f"[OctoVLA] Trying: {model_name}")
-                    self.model = OctoModel.load_pretrained(model_name)
-                    model_loaded_success = True
-                    print(f"[OctoVLA] ✓ Successfully loaded: {model_name}")
-                    break
-                except Exception as e:
-                    print(f"[OctoVLA]   Failed: {e}")
-                    continue
-            
-            if not model_loaded_success:
-                raise RuntimeError("Could not load any Octo model variant")
+            # Setup preprocessor and postprocessor
+            self.preprocess, self.postprocess = make_pre_post_processors(
+                self.model.config,
+                "lerobot/smolvla_base",
+                preprocessor_overrides={"device_processor": {"device": device}}
+            )
             
             self.model_loaded = True
-            print(f"[OctoVLA] ✓ Model loaded successfully!")
-            
-            # Check JAX devices
-            devices = jax.devices()
-            print(f"[OctoVLA] JAX devices: {devices}")
-            if device == "cuda" and devices[0].platform != 'gpu':
-                print(f"[OctoVLA] WARNING: Requested CUDA but JAX using {devices[0].platform}")
+            print(f"[SmolVLA] ✓ Model loaded successfully!")
+            print(f"[SmolVLA] Device: {next(self.model.parameters()).device}")
+            print(f"[SmolVLA] Parameters: {sum(p.numel() for p in self.model.parameters()) / 1e6:.1f}M")
                 
         except ImportError as e:
-            print(f"[OctoVLA] ✗ Octo not installed: {e}")
-            print(f"[OctoVLA] Install: pip install octo-models")
-            print(f"[OctoVLA] Using placeholder mode...")
+            print(f"[SmolVLA] ✗ LeRobot not installed: {e}")
+            print(f"[SmolVLA] Install LeRobot: pip install lerobot")
+            print(f"[SmolVLA] Using placeholder mode...")
         except Exception as e:
-            print(f"[OctoVLA] ✗ Error loading model: {e}")
-            print(f"[OctoVLA] Using placeholder mode...")
+            print(f"[SmolVLA] ✗ Error loading model: {e}")
+            print(f"[SmolVLA] Using placeholder mode...")
             import traceback
             traceback.print_exc()
     
     def infer(self, image: Union[np.ndarray, Image.Image], 
               instruction: str = "Monitor human proximity and adjust robot stiffness for safe collaboration") -> Dict:
         """
-        Run Octo inference on camera frame.
+        Run SmolVLA inference on camera frame.
         
         Args:
             image: RGB image (numpy array or PIL Image)
@@ -103,59 +88,65 @@ class OctoVLA:
             return self._placeholder(start_time)
         
         try:
-            # Convert to PIL and resize to Octo's expected size (256×256)
+            # Convert to PIL if numpy array
             if isinstance(image, np.ndarray):
                 image = Image.fromarray(image)
+            
+            # SmolVLA expects 256x256 images (as per model config)
             image = image.resize((256, 256))
+            image_np = np.array(image, dtype=np.uint8)
             
-            # Convert to numpy array [256, 256, 3] in range [0, 1]
-            image_array = np.array(image).astype(np.float32) / 255.0
+            # Convert to CHW format and add batch dimension
+            if image_np.ndim == 3 and image_np.shape[2] == 3:
+                image_np = image_np.transpose(2, 0, 1)  # HWC -> CHW
+            image_np = image_np[np.newaxis, ...]  # Add batch: CHW -> BCHW (1, 3, 256, 256)
             
-            # Prepare observation - Octo expects dict with specific keys
-            # Format: {batch_size: 1, height: 256, width: 256, channels: 3}
-            observation = {
-                "image_primary": image_array[np.newaxis, ...]  # Add batch dimension [1, H, W, C]
+            # Convert to torch tensors with float32 dtype (required for interpolation)
+            image_tensor = torch.from_numpy(image_np).float().to(self.device)
+            state_tensor = torch.zeros((1, 6), dtype=torch.float32).to(self.device)
+            
+            # Prepare raw observation dict
+            raw_obs = {
+                "observation.images.camera1": image_tensor,
+                "observation.state": state_tensor,
+                "task": instruction,
             }
             
-            # Octo uses language task directly as string
-            task = instruction
+            # Use preprocessor to prepare observation for model
+            processed_obs = self.preprocess(raw_obs)
             
-            # Run Octo inference
-            # Octo API: sample_actions(observation_dict, task_string, rng=None)
-            import jax
-            rng = jax.random.PRNGKey(0)  # Fixed seed for deterministic results
-            
-            action = self.model.sample_actions(
-                observation,
-                task,
-                rng=rng
-            )
-            
-            # Extract action from JAX array
-            # Octo returns: {action_dim: 7} = [x, y, z, roll, pitch, yaw, gripper]
-            if hasattr(action, '__array__'):
-                action_np = np.array(action).squeeze()
-            elif isinstance(action, dict) and 'action' in action:
-                action_np = np.array(action['action']).squeeze()
-            else:
-                action_np = np.array(action).squeeze()
+            # Run SmolVLA inference
+            with torch.no_grad():
+                action = self.model.select_action(processed_obs)
+                
+                # Extract action tensor
+                if isinstance(action, dict) and "action" in action:
+                    action_tensor = action["action"]
+                else:
+                    action_tensor = action
+                
+                # Convert to numpy
+                if isinstance(action_tensor, torch.Tensor):
+                    action_np = action_tensor.cpu().numpy().squeeze()
+                else:
+                    action_np = np.array(action_tensor).squeeze()
             
             # Convert to safety parameters
             safety_params = self._action_to_safety(action_np)
             safety_params["inference_time"] = time.time() - start_time
-            safety_params["model_type"] = "Octo-Base-93M"
+            safety_params["model_type"] = "SmolVLA-450M"
             
             return safety_params
             
         except Exception as e:
-            print(f"[OctoVLA] Inference error: {e}")
+            print(f"[SmolVLA] Inference error: {e}")
             import traceback
             traceback.print_exc()
             return self._placeholder(start_time)
     
     def _action_to_safety(self, action: np.ndarray) -> Dict:
         """
-        Convert Octo's 7-DOF action to safety parameters.
+        Convert SmolVLA's 7-DOF action to safety parameters.
         
         Logic: Large predicted actions indicate dynamic/unsafe scene
                Small predicted actions indicate stable/safe scene
@@ -168,15 +159,15 @@ class OctoVLA:
             action_6d = action[:6]
         else:
             # Handle unexpected action dimensions
-            print(f"[OctoVLA] Warning: Expected 7-DOF action, got {len(action)}-DOF")
+            print(f"[SmolVLA] Warning: Expected 7-DOF action, got {len(action)}-DOF")
             action_6d = np.zeros(6)
             action_6d[:len(action)] = action
         
         # Calculate action magnitude (proxy for scene dynamics)
         magnitude = np.linalg.norm(action_6d)
         
-        # Normalize (empirical Octo action range: 0-1.5)
-        normalized_mag = np.clip(magnitude / 1.5, 0, 1)
+        # Normalize (empirical SmolVLA action range: 0-2.0)
+        normalized_mag = np.clip(magnitude / 2.0, 0, 1)
         
         # Inverse relationship: large action = low safety
         safety_score = np.clip(1.0 - normalized_mag * 0.8, 0.1, 1.0)
@@ -226,23 +217,18 @@ class OctoVLA:
 
 
 def test_inference():
-    """Test Octo-Base inference."""
+    """Test SmolVLA inference."""
     print("\n" + "="*60)
-    print("Octo-Base VLA Test")
+    print("SmolVLA Test")
     print("="*60)
     
     # Check device availability
-    try:
-        import jax
-        devices = jax.devices()
-        device_type = "cuda" if devices[0].platform == 'gpu' else "cpu"
-        print(f"\nJAX devices available: {devices}")
-        print(f"Using device: {device_type}")
-    except:
-        device_type = "cpu"
-        print(f"\nJAX not available, using CPU")
+    device_type = "cuda" if torch.cuda.is_available() else "cpu"
+    print(f"\nPyTorch device: {device_type}")
+    if device_type == "cuda":
+        print(f"GPU: {torch.cuda.get_device_name(0)}")
     
-    model = OctoVLA(device=device_type)
+    model = SmolVLA(device=device_type)
     
     # Create test image
     test_image = np.random.randint(0, 255, (480, 640, 3), dtype=np.uint8)
@@ -262,9 +248,9 @@ def test_inference():
     
     if result['model_type'] == "Placeholder":
         print("\n⚠️  Running in PLACEHOLDER mode")
-        print("   Octo model not loaded - install: pip install octo-models")
+        print("   SmolVLA not loaded - install: pip install lerobot")
     else:
-        print(f"\n✓  Octo model loaded successfully")
+        print(f"\n✓  SmolVLA model loaded successfully")
         print(f"   Action dims: {result.get('action_dims', 'N/A')}")
     
     print("="*60 + "\n")

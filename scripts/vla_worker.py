@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Octo-Base VLA Worker - Real-time Safety Inference
-==================================================
+SmolVLA Worker - Real-time Safety Inference
+============================================
 
-Consumes camera frames from shared memory and runs Octo-Base inference.
+Consumes camera frames from shared memory and runs SmolVLA inference.
 
 Architecture:
-    camera_hri_demo.py → Shared Memory → vla_worker.py (Octo-Base) → Safety Parameters
+    camera_hri_demo.py → Shared Memory → vla_worker.py (SmolVLA) → Safety Parameters
     
 Performance:
-    - Inference: ~30-50ms (Octo-Base 93M)
+    - Inference: ~50-100ms (SmolVLA 450M)
     - Zero disk I/O
     - Real-time processing
 
@@ -18,11 +18,11 @@ Usage:
     cd /workspace
     ./isaaclab/isaaclab.sh -p VLM_Inferred_HRI_safety/scripts/camera_hri_demo.py --livestream 2 --enable_cameras
     
-    # Terminal 2: Start VLA worker (regular Python, NOT isaaclab.sh)
+    # Terminal 2: Start VLA worker (use lerobot conda environment)
     cd /workspace/VLM_Inferred_HRI_safety/scripts
-    python vla_worker.py
+    /isaac-sim/miniforge3/envs/lerobot/bin/python vla_worker.py
     
-    Note: Terminal 2 must use regular Python with Octo installed, NOT isaaclab.sh
+    Note: Terminal 2 must use lerobot conda Python, NOT isaaclab.sh
 """
 
 import argparse
@@ -31,12 +31,12 @@ import signal
 import sys
 
 from shared_buffer import SharedImageBuffer
-from vla_simple import OctoVLA
+from vla_simple import SmolVLA
 
 
-class OctoVLAWorker:
+class SmolVLAWorker:
     """
-    Real-time Octo-Base VLA worker for HRI safety monitoring.
+    Real-time SmolVLA worker for HRI safety monitoring.
     """
     
     def __init__(
@@ -46,11 +46,11 @@ class OctoVLAWorker:
         device: str = "cuda"
     ):
         """
-        Initialize Octo-Base VLA worker.
+        Initialize SmolVLA worker.
         
         Args:
             buffer_name: Shared memory buffer name
-            instruction: Task instruction for Octo
+            instruction: Task instruction for SmolVLA
             device: 'cuda' or 'cpu'
         """
         self.buffer_name = buffer_name
@@ -63,16 +63,16 @@ class OctoVLAWorker:
         self.total_inference_time = 0.0
         
         print("\n" + "="*70)
-        print("Octo-Base VLA Worker - Real-time Safety Inference")
+        print("SmolVLA Worker - Real-time Safety Inference")
         print("="*70)
         print(f"Buffer: {buffer_name}")
         print(f"Device: {device}")
         print(f"Instruction: '{instruction}'")
         print("="*70 + "\n")
         
-        # Initialize Octo-Base model
-        print(f"[Worker] Loading Octo-Base VLA...")
-        self.vla_model = OctoVLA(device=device)
+        # Initialize SmolVLA model
+        print(f"[Worker] Loading SmolVLA...")
+        self.vla_model = SmolVLA(device=device)
         
         # Attach to shared memory buffer
         print(f"\n[Worker] Connecting to shared memory buffer...")
@@ -104,7 +104,7 @@ class OctoVLAWorker:
     
     def run(self, poll_interval: float = 0.05):
         """
-        Main worker loop: read frames and run Octo-Base inference.
+        Main worker loop: read frames and run SmolVLA inference.
         
         Args:
             poll_interval: Time between buffer reads (seconds, default: 0.05 = 20Hz)
@@ -136,7 +136,7 @@ class OctoVLAWorker:
                 # Calculate latency
                 frame_age_ms = (time.time_ns() - metadata['timestamp_ns']) / 1e6
                 
-                # Run Octo-Base inference
+                # Run SmolVLA inference
                 safety_params = self.vla_model.infer(image_np, instruction=self.instruction)
                 
                 # Update statistics
@@ -181,7 +181,7 @@ class OctoVLAWorker:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Octo-Base VLA Worker - Real-time Safety Inference from Camera Frames"
+        description="SmolVLA Worker - Real-time Safety Inference from Camera Frames"
     )
     parser.add_argument(
         "--buffer-name",
@@ -199,7 +199,7 @@ def main():
         "--instruction",
         type=str,
         default="Monitor human proximity and adjust robot stiffness for safe collaboration",
-        help="Task instruction for Octo-Base VLA"
+        help="Task instruction for SmolVLA"
     )
     parser.add_argument(
         "--device",
@@ -212,7 +212,7 @@ def main():
     args = parser.parse_args()
     
     # Create and run worker
-    worker = OctoVLAWorker(
+    worker = SmolVLAWorker(
         buffer_name=args.buffer_name,
         instruction=args.instruction,
         device=args.device
