@@ -1,64 +1,60 @@
 #!/usr/bin/env python3
 """
-VLA Worker Process - Consumes Camera Frames from Shared Memory
-================================================================
+Octo-Base VLA Worker - Real-time Safety Inference
+==================================================
 
-Asynchronous VLA worker that:
-1. Reads camera frames from shared memory buffer (zero disk I/O)
-2. Runs VLA inference for safety parameter generation
-3. Outputs safety parameters for robot control
+Consumes camera frames from shared memory and runs Octo-Base inference.
 
 Architecture:
-    camera_hri_demo.py → SharedImageBuffer → vla_worker.py → safety parameters
+    camera_hri_demo.py → Shared Memory → vla_worker.py (Octo-Base) → Safety Parameters
     
 Performance:
-    - Zero disk I/O overhead
-    - Asynchronous: VLA runs independently of camera (100Hz)
-    - Always processes latest frame (natural frame skipping)
+    - Inference: ~30-50ms (Octo-Base 93M)
+    - Zero disk I/O
+    - Real-time processing
 
 Usage:
-    # Terminal 1: Start camera + Isaac Sim
-    ./isaaclab/isaaclab.sh -p camera_hri_demo.py --livestream 2 --enable_cameras
+    # Terminal 1: Start Isaac Sim camera demo (MUST use isaaclab.sh)
+    cd /workspace
+    ./isaaclab/isaaclab.sh -p VLM_Inferred_HRI_safety/scripts/camera_hri_demo.py --livestream 2 --enable_cameras
     
-    # Terminal 2: Start VLA worker
+    # Terminal 2: Start VLA worker (regular Python, NOT isaaclab.sh)
+    cd /workspace/VLM_Inferred_HRI_safety/scripts
     python vla_worker.py
+    
+    Note: Terminal 2 must use regular Python with Octo installed, NOT isaaclab.sh
 """
 
 import argparse
 import time
-import numpy as np
 import signal
 import sys
-from pathlib import Path
 
-# Import shared buffer
 from shared_buffer import SharedImageBuffer
-
-# Import simplified VLA model (no LeRobot dependency)
-from vla_simple import SimplifiedVLA
+from vla_simple import OctoVLA
 
 
-class VLAWorker:
+class OctoVLAWorker:
     """
-    Asynchronous VLA worker for HRI safety monitoring.
+    Real-time Octo-Base VLA worker for HRI safety monitoring.
     """
     
     def __init__(
         self,
         buffer_name: str = "hri_camera_buffer",
-        safety_instruction: str = "Monitor human proximity and adjust robot stiffness for safe collaboration",
+        instruction: str = "Monitor human proximity and adjust robot stiffness for safe collaboration",
         device: str = "cuda"
     ):
         """
-        Initialize VLA worker.
+        Initialize Octo-Base VLA worker.
         
         Args:
-            buffer_name: Name of shared memory buffer (must match camera producer)
-            safety_instruction: Safety instruction for VLA inference
-            device: 'cuda' or 'cpu' for model inference
+            buffer_name: Shared memory buffer name
+            instruction: Task instruction for Octo
+            device: 'cuda' or 'cpu'
         """
         self.buffer_name = buffer_name
-        self.safety_instruction = safety_instruction
+        self.instruction = instruction
         self.running = True
         self.last_frame_count = -1
         
@@ -66,15 +62,20 @@ class VLAWorker:
         self.frames_processed = 0
         self.total_inference_time = 0.0
         
-        print(f"[VLAWorker] Initializing...")
-        print(f"[VLAWorker] Safety instruction: '{safety_instruction}'")
+        print("\n" + "="*70)
+        print("Octo-Base VLA Worker - Real-time Safety Inference")
+        print("="*70)
+        print(f"Buffer: {buffer_name}")
+        print(f"Device: {device}")
+        print(f"Instruction: '{instruction}'")
+        print("="*70 + "\n")
         
-        # Initialize VLA model
-        print(f"[VLAWorker] Loading VLA model on {device}...")
-        self.vla_model = SimplifiedVLA(device=device)
+        # Initialize Octo-Base model
+        print(f"[Worker] Loading Octo-Base VLA...")
+        self.vla_model = OctoVLA(device=device)
         
         # Attach to shared memory buffer
-        print(f"[VLAWorker] Connecting to buffer '{buffer_name}'...")
+        print(f"\n[Worker] Connecting to shared memory buffer...")
         try:
             self.buffer = SharedImageBuffer(
                 name=buffer_name,
@@ -84,48 +85,34 @@ class VLAWorker:
                 channels=3,
                 create=False  # Consumer mode
             )
-            print(f"[VLAWorker] Successfully connected to shared buffer")
+            print(f"[Worker] ✓ Connected to buffer successfully\n")
         except FileNotFoundError:
-            print(f"[VLAWorker] ERROR: Buffer '{buffer_name}' not found!")
-            print(f"[VLAWorker] Make sure camera_hri_demo.py is running first.")
+            print(f"[Worker] ✗ ERROR: Buffer '{buffer_name}' not found!")
+            print(f"[Worker] Start camera_hri_demo.py first:\n")
+            print(f"  cd /workspace")
+            print(f"  ./isaaclab/isaaclab.sh -p VLM_Inferred_HRI_safety/scripts/camera_hri_demo.py --livestream 2 --enable_cameras\n")
             raise
         
-        # Setup signal handler for graceful shutdown
+        # Setup graceful shutdown
         signal.signal(signal.SIGINT, self._signal_handler)
         signal.signal(signal.SIGTERM, self._signal_handler)
     
     def _signal_handler(self, signum, frame):
-        """Handle Ctrl+C gracefully"""
-        print(f"\n[VLAWorker] Received signal {signum}, shutting down...")
+        """Handle Ctrl+C gracefully."""
+        print(f"\n[Worker] Shutting down...")
         self.running = False
     
-    def process_frame(self, image_np: np.ndarray) -> dict:
+    def run(self, poll_interval: float = 0.05):
         """
-        Run VLA inference on camera frame.
+        Main worker loop: read frames and run Octo-Base inference.
         
         Args:
-            image_np: numpy array (H, W, 3) uint8 RGB image
-            
-        Returns:
-            Safety parameters dictionary
+            poll_interval: Time between buffer reads (seconds, default: 0.05 = 20Hz)
         """
-        # Run SmolVLA inference
-        safety_params = self.vla_model.infer(
-            image_np,
-            instruction=self.safety_instruction
-        )
-        
-        return safety_params
-    
-    def run(self, poll_interval: float = 0.1):
-        """
-        Main worker loop: continuously read latest frame and process with VLA.
-        
-        Args:
-            poll_interval: Time to wait between buffer reads (seconds)
-        """
-        print(f"[VLAWorker] Starting worker loop (poll interval: {poll_interval}s)")
-        print(f"[VLAWorker] Press Ctrl+C to stop\n")
+        print(f"[Worker] Starting inference loop")
+        print(f"[Worker] Poll interval: {poll_interval}s")
+        print(f"[Worker] Press Ctrl+C to stop\n")
+        print("-" * 70)
         
         while self.running:
             try:
@@ -133,110 +120,101 @@ class VLAWorker:
                 result = self.buffer.read_latest()
                 
                 if result is None:
-                    # No data available yet
                     time.sleep(poll_interval)
                     continue
                 
                 image_np, metadata = result
                 frame_count = metadata['frame_count']
                 
-                # Skip if we've already processed this frame
+                # Skip if already processed
                 if frame_count <= self.last_frame_count:
                     time.sleep(poll_interval)
                     continue
                 
                 self.last_frame_count = frame_count
                 
-                # Calculate frame age
-                frame_timestamp_ns = metadata['timestamp_ns']
-                current_time_ns = time.time_ns()
-                frame_age_ms = (current_time_ns - frame_timestamp_ns) / 1e6
+                # Calculate latency
+                frame_age_ms = (time.time_ns() - metadata['timestamp_ns']) / 1e6
                 
-                print(f"\n[VLAWorker] Processing buffer frame #{frame_count} (age: {frame_age_ms:.1f}ms)")
-                
-                # Run VLA inference
-                safety_params = self.process_frame(image_np)
+                # Run Octo-Base inference
+                safety_params = self.vla_model.infer(image_np, instruction=self.instruction)
                 
                 # Update statistics
                 self.frames_processed += 1
                 self.total_inference_time += safety_params['inference_time']
+                avg_fps = self.frames_processed / self.total_inference_time if self.total_inference_time > 0 else 0
                 
                 # Print results
-                print(f"[VLAWorker] Inference time: {safety_params['inference_time']:.3f}s")
-                print(f"[VLAWorker] Model: {safety_params.get('model_type', 'Unknown')}")
-                print(f"[VLAWorker] Safety Parameters:")
-                print(f"  Safety Score:   {safety_params['safety_score']:.2f}")
+                print(f"\n[Frame #{frame_count}] Age: {frame_age_ms:.1f}ms | Inference: {safety_params['inference_time']*1000:.1f}ms")
+                print(f"  Safety Score:   {safety_params['safety_score']:.3f}")
                 print(f"  Action:         {safety_params['action_command'].upper()}")
-                print(f"  Impedance XY:   {safety_params['impedance_xy']:.2f}")
-                print(f"  Impedance Z:    {safety_params['impedance_z']:.2f}")
-                print(f"  Force Limit:    {safety_params['force_limit']:.2f}")
-                if 'raw_output' in safety_params:
-                    print(f"  VLA Output:     {safety_params['raw_output'][:100]}...")
-                print("-" * 60)
+                print(f"  Impedance XY:   {safety_params['impedance_xy']:.3f}")
+                print(f"  Impedance Z:    {safety_params['impedance_z']:.3f}")
+                print(f"  Force Limit:    {safety_params['force_limit']:.3f}")
+                print(f"  Action Mag:     {safety_params.get('action_magnitude', 0):.3f}")
+                print(f"  Model:          {safety_params['model_type']}")
+                print(f"  Stats:          {self.frames_processed} frames | {avg_fps:.2f} FPS avg")
+                print("-" * 70)
                 
-                # Calculate average FPS
-                avg_inference_time = self.total_inference_time / self.frames_processed
-                avg_fps = 1.0 / avg_inference_time if avg_inference_time > 0 else 0
-                print(f"[VLAWorker] Stats: {self.frames_processed} frames, avg {avg_fps:.2f} FPS")
-                
-                # Wait before next poll
                 time.sleep(poll_interval)
                 
             except KeyboardInterrupt:
-                print(f"\n[VLAWorker] Interrupted by user")
                 break
             except Exception as e:
-                print(f"[VLAWorker] ERROR: {e}")
+                print(f"\n[Worker] ERROR: {e}")
                 import traceback
                 traceback.print_exc()
                 break
         
         # Cleanup
-        print(f"\n[VLAWorker] Shutting down...")
-        print(f"[VLAWorker] Total frames processed: {self.frames_processed}")
+        print(f"\n{'='*70}")
+        print(f"Shutdown Summary")
+        print(f"{'='*70}")
+        print(f"Total frames processed: {self.frames_processed}")
         if self.frames_processed > 0:
             avg_time = self.total_inference_time / self.frames_processed
-            print(f"[VLAWorker] Average inference time: {avg_time:.3f}s ({1.0/avg_time:.2f} FPS)")
+            print(f"Average inference time: {avg_time*1000:.1f}ms ({1.0/avg_time:.2f} FPS)")
+        print(f"{'='*70}\n")
         
         self.buffer.close()
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="VLA Worker - Process camera frames from shared memory"
+        description="Octo-Base VLA Worker - Real-time Safety Inference from Camera Frames"
     )
     parser.add_argument(
         "--buffer-name",
         type=str,
         default="hri_camera_buffer",
-        help="Name of the shared memory buffer (default: hri_camera_buffer)"
+        help="Shared memory buffer name (default: hri_camera_buffer)"
     )
     parser.add_argument(
         "--poll-interval",
         type=float,
-        default=0.1,
-        help="Time between buffer reads in seconds (default: 0.1)"
+        default=0.05,
+        help="Time between buffer reads in seconds (default: 0.05 = 20Hz)"
     )
     parser.add_argument(
         "--instruction",
         type=str,
         default="Monitor human proximity and adjust robot stiffness for safe collaboration",
-        help="Safety instruction for VLA"
+        help="Task instruction for Octo-Base VLA"
     )
     parser.add_argument(
         "--device",
         type=str,
         default="cuda",
         choices=["cuda", "cpu"],
-        help="Device for VLA inference (default: cuda)"
+        help="Device for inference (default: cuda)"
     )
     
     args = parser.parse_args()
     
     # Create and run worker
-    worker = VLAWorker(
+    worker = OctoVLAWorker(
         buffer_name=args.buffer_name,
-        safety_instruction=args.instruction,
+        instruction=args.instruction,
         device=args.device
     )
     
