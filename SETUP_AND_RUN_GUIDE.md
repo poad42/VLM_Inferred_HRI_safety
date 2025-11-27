@@ -41,7 +41,7 @@ Safety Parameters (impedance, force limits, action commands)
 
 **Environment**: Default shell (no conda)
 
-<!-- ```bash
+```bash
 cd /tmp
 wget "https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-$(uname)-$(uname -m).sh"
 bash Miniforge3-$(uname)-$(uname -m).sh
@@ -107,7 +107,7 @@ cd lerobot
 /isaac-sim/miniforge3/envs/lerobot/bin/python -m pip install -e .
 /isaac-sim/miniforge3/envs/lerobot/bin/python -m pip install lerobot
 /isaac-sim/miniforge3/envs/lerobot/bin/python -m pip install -e ".[smolvla]"
-``` -->
+```
 
 **This will take 5-10 minutes.** You'll see many packages being installed.
 
@@ -183,12 +183,8 @@ conda deactivate
 # Navigate to workspace root
 cd /workspace
 
-
-# Declare environment variable 
-export ENABLE_CAMERAS=1
-
 # Run Isaac Sim with camera demo
-./isaaclab/isaaclab.sh -p /workspace/VLM_Inferred_HRI_safety/scripts/camera_hri_demo.py --livestream 2 --enable_cameras
+export ENABLE_CAMERAS=1; ./isaaclab/isaaclab.sh -p /workspace/VLM_Inferred_HRI_safety/scripts/camera_hri_demo.py --livestream 2 --enable_cameras
 ```
 
 **Expected output:**
