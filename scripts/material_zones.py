@@ -3,47 +3,51 @@ Material zone configuration for VLM-based impedance modulation.
 Defines visual and physical properties of different wood sections.
 """
 
-# Material zones along the log (X-axis)
-# Log is 0.8m long, centered at X=0.45, so ranges from 0.05 to 0.85
+# Material zones along the log (Y-axis)
+# Log is centered at Y=0.0
+# Soft (-0.25), Knot (0.0), Crack (+0.25)
 
 MATERIAL_ZONES = {
     "soft_wood": {
-        "x_range": (0.05, 0.35),  # First 30cm
+        "y_range": (-0.40, -0.15),  # Left section
         "color": (0.7, 0.5, 0.3),  # Light tan
         "friction": 0.3,  # Low resistance
-        "recommended_stiffness": 300.0,
+        "recommended_stiffness": 500.0,
+        "target_force": 10.0,  # N (Ideal cutting force)
         "description": "Soft pine, easy cutting",
     },
     "knot": {
-        "x_range": (0.35, 0.55),  # Middle 20cm
+        "y_range": (-0.15, 0.15),  # Middle section
         "color": (0.4, 0.25, 0.15),  # Dark brown
         "friction": 0.9,  # High resistance
-        "recommended_stiffness": 800.0,
+        "recommended_stiffness": 600.0,
+        "target_force": 40.0,  # N (Requires more force)
         "description": "Hard knot, dense grain",
     },
     "cracked": {
-        "x_range": (0.55, 0.85),  # Last 30cm
+        "y_range": (0.15, 0.40),  # Right section
         "color": (0.6, 0.4, 0.2),  # Medium brown with visual cracks
         "friction": 0.2,  # Very low (weak structure)
-        "recommended_stiffness": 200.0,
+        "recommended_stiffness": 400.0,
+        "target_force": 5.0,  # N (Gentle handling required)
         "description": "Cracked section, will split easily",
     },
 }
 
 
-def get_material_at_position(x_pos):
+def get_material_at_position(y_pos):
     """
-    Determine material zone based on X position.
+    Determine material zone based on Y position.
 
     Args:
-        x_pos: X coordinate in world frame
+        y_pos: Y coordinate in world frame
 
     Returns:
         Material zone name and properties
     """
     for zone_name, props in MATERIAL_ZONES.items():
-        x_min, x_max = props["x_range"]
-        if x_min <= x_pos <= x_max:
+        y_min, y_max = props["y_range"]
+        if y_min <= y_pos <= y_max:
             return zone_name, props
 
     # Default to soft wood if outside ranges
