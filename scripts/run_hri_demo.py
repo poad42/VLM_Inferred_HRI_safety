@@ -21,6 +21,9 @@ import argparse
 from isaaclab.app import AppLauncher
 import copy
 import torch
+import numpy as np
+from PIL import Image
+import os
 
 # Boilerplate
 parser = argparse.ArgumentParser(
@@ -48,7 +51,7 @@ from isaaclab.assets import (
     RigidObjectCfg,
 )
 
-# from isaaclab.sensors import CameraCfg # REMOVED CAMERA
+from isaaclab.sensors import Camera  # CAMERA RE-ENABLED FOR VLA
 from isaaclab.sensors import FrameTransformerCfg
 from isaaclab.sensors.frame_transformer import OffsetCfg
 from isaaclab.controllers import (
@@ -71,9 +74,8 @@ from isaaclab_assets import FRANKA_PANDA_HIGH_PD_CFG
 # --- NEW ATTACHMENT IMPORT (v11 FIX) ---
 import omni.physx.scripts.physicsUtils
 import omni.usd
-import omni.physx.scripts.physicsUtils
-import omni.usd
-from camera_utils import add_camera_to_scene, save_camera_image
+from camera_utils import add_camera_to_scene
+from shared_buffer import SharedImageBuffer
 
 # --- END NEW IMPORTS ---
 
@@ -203,6 +205,45 @@ class AttachmentHelper:
 
 
 # --- END NEW ATTACHMENT HELPER CLASS ---
+
+
+# --- CAMERA FUNCTIONS: Shared Memory Buffer ---
+def write_camera_to_buffer(camera: Camera, shared_buffer: SharedImageBuffer, frame_count: int) -> bool:
+    """Write camera frame to shared memory buffer for VLA inference"""
+    try:
+        # Check camera data availability
+        if not hasattr(camera.data, 'output') or "rgb" not in camera.data.output:
+            return False
+            
+        # Get raw RGB data [num_envs, H, W, 3 or 4]
+        rgb_data = camera.data.output["rgb"]
+        if rgb_data is None:
+            return False
+        
+        # Extract first environment, convert to numpy
+        rgb_np = rgb_data[0].cpu().numpy()
+        
+        # Handle data type: Isaac Lab outputs float32 in [0, 1] range
+        if rgb_np.dtype in (np.float32, np.float64):
+            rgb_np = (np.clip(rgb_np, 0, 1) * 255).astype(np.uint8)
+        
+        # Drop alpha if present
+        if rgb_np.shape[2] == 4:
+            rgb_np = rgb_np[:, :, :3]
+        
+        # Write to shared memory buffer
+        success = shared_buffer.write(rgb_np)
+        
+        if success:
+            stats = shared_buffer.get_stats()
+            print(f"[Camera→Buffer] Frame {frame_count} → Buffer #{stats['frame_count']}")
+        
+        return success
+        
+    except Exception as e:
+        print(f"[Camera→Buffer Error] Frame {frame_count}: {e}")
+        return False
+# --- END CAMERA FUNCTIONS ---
 
 
 # --- KEYBOARD HANDLER (IMPLEMENTATION PLAN SECTION 6.1) ---
@@ -485,7 +526,19 @@ def main():
     robot = scene["robot"]
     saw = scene["saw"]
     log = scene["log_knot"]  # Use middle zone (knot) as primary log reference
-    camera = scene["camera"]  # NEW: Get camera reference
+    camera = scene["camera"]  # Camera for VLA inference
+
+    # --- Initialize Shared Memory Buffer for VLA ---
+    shared_buffer = SharedImageBuffer(
+        name="hri_camera_buffer",
+        buffer_size=10,
+        height=480,
+        width=640,
+        channels=3,
+        create=True
+    )
+    print(f"[SharedBuffer] Initialized for camera→VLA communication")
+    # --- End Buffer Init ---
 
     # --- MODIFIED (v12) ---
     # Instantiate the helper, passing the sim object.
@@ -518,7 +571,9 @@ def main():
     print(" M:   Decrease force magnitude (-5 N)")
     print(" R:   Reset all forces to default")
     print(" T:   Toggle REMOVED. Attached by default.")
-    print(" Camera: Capturing every 30 frames")
+    print(" LEFT/RIGHT: Traverse material zones (Y-axis)")
+    print(" UP/DOWN: Adjust cutting height (Z-axis)")
+    print(" Camera: Capturing every 30 frames → Shared buffer for VLA")
     print("--------------------")
     # --- END MODIFIED ---
 
@@ -814,10 +869,11 @@ def main():
             robot.set_joint_effort_target(joint_efforts, joint_ids=arm_joint_ids)
             robot.write_data_to_sim()
 
-            # --- NEW: Camera capture logic ---
+            # --- Camera capture: Write to shared memory buffer for VLA ---
             if frame_count % capture_every == 0:
-                save_camera_image(camera, frame_count)
+                write_camera_to_buffer(camera, shared_buffer, frame_count)
             frame_count += 1
+            # --- END CAMERA CAPTURE ---
 
             # --- COMPREHENSIVE DEBUG OUTPUT (EVERY FRAME) ---
             if True:  # Always print for debugging
@@ -881,6 +937,12 @@ def main():
         traceback.print_exc()  # --- END CAMERA CAPTURE ---
 
     finally:
+        # Clean up shared memory buffer
+        if 'shared_buffer' in locals():
+            print("[SharedBuffer] Cleaning up...")
+            shared_buffer.close()
+            shared_buffer.unlink()
+        
         # --- Unsubscribe the global function ---
         if (
             "carb_input" in locals()
