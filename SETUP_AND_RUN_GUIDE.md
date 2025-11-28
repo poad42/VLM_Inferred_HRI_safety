@@ -184,7 +184,7 @@ conda deactivate
 cd /workspace
 
 # Run Isaac Sim with camera demo
-export ENABLE_CAMERAS=1; ./isaaclab/isaaclab.sh -p /workspace/VLM_Inferred_HRI_safety/scripts/camera_hri_demo.py --livestream 2 --enable_cameras
+export ENABLE_CAMERAS=1; ./isaaclab/isaaclab.sh -p /workspace/VLM_Inferred_HRI_safety/scripts/run_hri_demo.py --livestream 2 --enable_cameras
 ```
 
 **Expected output:**
