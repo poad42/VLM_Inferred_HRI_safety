@@ -24,6 +24,7 @@ import torch
 import numpy as np
 from PIL import Image
 import os
+import numpy as np
 
 # Boilerplate
 parser = argparse.ArgumentParser(
@@ -40,6 +41,7 @@ app_launcher = AppLauncher(args_cli)
 simulation_app = app_launcher.app
 
 # --- MOVED IMPORT TO TOP ---
+# --- MOVED IMPORT TO TOP ---
 from isaaclab.sim import SimulationCfg, SimulationContext
 import isaaclab.sim as sim_utils
 from isaaclab.scene import InteractiveScene, InteractiveSceneCfg
@@ -50,6 +52,13 @@ from isaaclab.assets import (
     RigidObject,
     RigidObjectCfg,
 )
+
+# Debug Drawing
+try:
+    from omni.isaac.debug_draw import _debug_draw
+except ImportError:
+    print("[WARNING] omni.isaac.debug_draw not found. HUD will be disabled.")
+    _debug_draw = None
 
 from isaaclab.sensors import Camera  # CAMERA RE-ENABLED FOR VLA
 from isaaclab.sensors import FrameTransformerCfg
@@ -79,6 +88,8 @@ from shared_buffer import SharedImageBuffer
 
 # --- END NEW IMPORTS ---
 
+from material_zones import get_material_at_position, material_to_stiffness
+
 # --- KEYBOARD IMPL (IMPLEMENTATION PLAN SECTION 6) ---
 # Force command in EE frame [fx, fy, fz]
 g_human_saw_force_cmd_ee = torch.zeros(1, 3)
@@ -102,6 +113,16 @@ g_target_z_position = 0.53  # Default height (resting on log)
 Z_MOVE_INCREMENT = 0.02  # 2cm per arrow key press
 Z_MIN_LIMIT = 0.45  # Don't go too low (collision)
 Z_MAX_LIMIT = 0.70  # Don't go too high (reach limit)
+
+# ORACLE BENCHMARK (Day 2.5)
+g_oracle_mode = False  # Toggle with 'O'
+g_penalty_mode = False  # Toggle with 'P'
+
+# STIFFNESS SMOOTHING (Stability Fix)
+g_smoothed_stiffness = 400.0  # Start at baseline
+STIFFNESS_RAMP_RATE = (
+    5.0  # Max change per step (N/m per 10ms) -> 500 N/m/s (Slower for stability)
+)
 
 
 # --- NEW ATTACHMENT HELPER CLASS (v12) ---
@@ -249,7 +270,7 @@ def write_camera_to_buffer(camera: Camera, shared_buffer: SharedImageBuffer, fra
 # --- KEYBOARD HANDLER (IMPLEMENTATION PLAN SECTION 6.1) ---
 def _on_keyboard_event(event, saw_object: RigidObject):
     """Callback to apply force to the saw object and control Y/Z position"""
-    global g_human_saw_force_cmd_ee, g_force_magnitude, g_downward_force_target, g_target_y_position, g_target_z_position
+    global g_human_saw_force_cmd_ee, g_force_magnitude, g_downward_force_target, g_target_y_position, g_target_z_position, g_oracle_mode, g_penalty_mode
 
     if event.type in (
         carb.input.KeyboardEventType.KEY_PRESS,
@@ -302,6 +323,16 @@ def _on_keyboard_event(event, saw_object: RigidObject):
             g_force_magnitude = 5.0
             g_downward_force_target = 0.0  # Also reset downward force
             print(f"[Force Control] Reset force to {g_force_magnitude:.1f} N")
+        elif event.input == carb.input.KeyboardInput.O:
+            # Toggle Oracle Mode
+            g_oracle_mode = not g_oracle_mode
+            status = "ENABLED" if g_oracle_mode else "DISABLED"
+            print(f"[ORACLE] Mode {status}")
+        elif event.input == carb.input.KeyboardInput.P:
+            # Toggle Penalty Mode
+            g_penalty_mode = not g_penalty_mode
+            status = "ENABLED" if g_penalty_mode else "DISABLED"
+            print(f"[PENALTY] Mode {status}")
         # --- REMOVED 'T' KEY ---
 
     elif event.type == carb.input.KeyboardEventType.KEY_RELEASE:
@@ -618,13 +649,14 @@ def main():
     # CRITICAL FIX: These are RATIOS, not absolute values!
     # OSC formula: d_gains = 2 * sqrt(p_gains) * damping_ratio
     # Lower damping on Z-axis for compliance, higher on rotations for stability
+    # UPDATED (User Request): Increased damping to prevent "swinging" and "flatness"
     default_damping_ratio_tuple = (
-        1.0,  # Translation X - critically damped
-        1.0,  # Translation Y - critically damped
-        0.7,  # Translation Z - slightly underdamped for compliance
-        2.0,  # Rotation Roll - overdamped for stability
-        2.0,  # Rotation Pitch - overdamped for stability
-        1.0,  # Rotation Yaw
+        2.0,  # Translation X - overdamped
+        4.0,  # Translation Y - heavily overdamped (prevent swing)
+        1.0,  # Translation Z - critically damped (was 0.7)
+        5.0,  # Rotation Roll - very heavily overdamped (lock orientation)
+        5.0,  # Rotation Pitch - very heavily overdamped (lock orientation)
+        2.0,  # Rotation Yaw - overdamped
     )
 
     osc_cfg = OperationalSpaceControllerCfg(
@@ -797,6 +829,87 @@ def main():
             current_stiffness[:, 2] = 200.0
             current_stiffness[:, 3:] = 1500.0
 
+            # --- ORACLE BENCHMARK LOGIC (Day 2.5) ---
+            if g_oracle_mode:
+                # 1. Get Ground Truth Position
+                # CRITICAL FIX: Use COMMANDED Y (g_target_y_position) instead of ACTUAL Y (saw_pos_w)
+                # Using actual Y creates a feedback loop: Swing -> Y changes -> Stiffness changes -> More swing
+                saw_y = g_target_y_position
+
+                # 2. Query Material Zone
+                zone_name, props = get_material_at_position(saw_y)
+                target_stiffness = props["recommended_stiffness"]
+                target_force_limit = props.get(
+                    "target_force", 20.0
+                )  # Default 20N if missing
+
+                # 3. Apply Force-Dependent Stiffness (REMOVED per user request)
+                # User: "I don't like that regulation for increasing stiffness in response, remove that for now"
+                current_human_force = g_force_magnitude
+                # if current_human_force > target_force_limit:
+                #     excess_force = current_human_force - target_force_limit
+                #     force_penalty_stiffness = excess_force * 10.0
+                #     target_stiffness += force_penalty_stiffness
+
+                # 4. Apply Penalty (if enabled)
+                if g_penalty_mode:
+                    # Invert stiffness to cause failure
+                    # If hard (600) -> make soft (400) -> Instability on knot
+                    # If soft (500) -> make stiff (600) -> Rigid/Vibration
+                    if target_stiffness >= 550:
+                        target_stiffness = 400.0
+                    else:
+                        target_stiffness = 600.0
+
+                # 5. Apply to Translational Stiffness (X/Y/Z) with SMOOTHING
+                # We modulate the translational stiffness to simulate "giving way" or "resisting"
+
+                # Smooth the stiffness change to prevent instability
+                global g_smoothed_stiffness
+                stiffness_error = target_stiffness - g_smoothed_stiffness
+                stiffness_delta = max(
+                    min(stiffness_error, STIFFNESS_RAMP_RATE), -STIFFNESS_RAMP_RATE
+                )
+                g_smoothed_stiffness += stiffness_delta
+
+                current_stiffness[:, :3] = g_smoothed_stiffness
+
+                # CRITICAL FIX: Enforce high rotational stiffness to prevent "swinging"
+                # The user reported "swings around like crazy", which means rotational control is too loose
+                current_stiffness[:, 3:] = (
+                    2000.0  # Increased from 1500.0 for extra stability
+                )
+
+                # Also increase damping for rotation (if possible via OSC config, but here we control stiffness)
+                # We can't easily change damping ratio dynamically in this script without accessing the cfg
+                # But higher stiffness with the same damping ratio = higher damping force
+
+                # Debug Print
+                if frame_count % 30 == 0:
+                    mode_str = "PENALTY" if g_penalty_mode else "ORACLE"
+                    print(
+                        f"[{mode_str}] Zone: {zone_name.upper()} | Force: {current_human_force:.1f}/{target_force_limit:.1f}N | Target K: {target_stiffness:.0f} | Actual K: {g_smoothed_stiffness:.0f}"
+                    )
+
+                # --- IN-SCENE VISUALIZATION ---
+                if _debug_draw:
+                    draw = _debug_draw.acquire_debug_draw_interface()
+                    # Position text above the saw
+                    text_pos = saw_pos_w.cpu().numpy() + np.array([0.0, 0.0, 0.3])
+
+                    # Format text
+                    status_text = f"ZONE: {zone_name.upper()}\n"
+                    status_text += f"FORCE: {current_human_force:.1f} / {target_force_limit:.1f} N\n"
+                    status_text += f"STIFFNESS: {g_smoothed_stiffness:.0f} N/m"
+
+                    # Color based on compliance (Green=Good, Red=Overload)
+                    if current_human_force > target_force_limit:
+                        color = (1.0, 0.0, 0.0, 1.0)  # Red
+                    else:
+                        color = (0.0, 1.0, 0.0, 1.0)  # Green
+
+                    draw.draw_text(text_pos.tolist(), status_text, 20, color)
+
             # Target Orientation: [0, 1, 0, 0] (w, x, y, z) -> 180 deg around X
             # This points the gripper Z-axis DOWN
             target_ee_pose_b[:, 3] = 0.0
@@ -846,9 +959,17 @@ def main():
                 )
                 print(f"Saw Euler (deg): {saw_euler}")
 
-            # Z-compliance shift: 5mm per 1N (tuning parameter from Section 6.2)
+            # Z-compliance shift: Based on dynamic stiffness
             # This creates a "virtual spring" that generates force proportional to displacement
-            z_compliance_shift = g_downward_force_applied * 0.005  # 5mm/N
+            # F = K * x  ->  x = F / K
+            # We use the smoothed stiffness to ensure consistent reaction
+            if g_smoothed_stiffness > 1.0:
+                raw_shift = g_downward_force_applied / g_smoothed_stiffness
+                # Clamp shift to 5cm max to prevent "falling" feeling at low stiffness
+                z_compliance_shift = min(raw_shift, 0.05)
+            else:
+                z_compliance_shift = 0.0
+
             target_ee_pose_b[:, 2] -= z_compliance_shift  # Lower Z target
 
             # Action dim = 7 (pose) + 6 (stiffness) = 13
