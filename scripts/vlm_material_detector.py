@@ -17,6 +17,7 @@ import time
 import signal
 import sys
 from shared_buffer import SharedImageBuffer
+from shared_result_buffer import SharedResultBuffer
 
 
 # Placeholder for VLM model - replace with actual SmolVLA
@@ -58,8 +59,14 @@ class MaterialVLM:
 class MaterialDetectorWorker:
     """Real-time material detection worker."""
 
-    def __init__(self, buffer_name="hri_camera_buffer", device="cuda"):
+    def __init__(
+        self,
+        buffer_name="hri_camera_buffer",
+        result_buffer_name="vlm_results",
+        device="cuda",
+    ):
         self.buffer_name = buffer_name
+        self.result_buffer_name = result_buffer_name
         self.running = True
         self.last_frame_count = -1
 
@@ -70,8 +77,8 @@ class MaterialDetectorWorker:
         # Initialize VLM
         self.vlm = MaterialVLM(device=device)
 
-        # Connect to shared buffer
-        print(f"\n[Worker] Connecting to buffer '{buffer_name}'...")
+        # Connect to camera buffer (consumer)
+        print(f"\n[Worker] Connecting to camera buffer '{buffer_name}'...")
         try:
             self.buffer = SharedImageBuffer(
                 name=buffer_name,
@@ -81,10 +88,21 @@ class MaterialDetectorWorker:
                 channels=3,
                 create=False,  # Consumer mode
             )
-            print(f"[Worker] ✓ Connected\n")
+            print(f"[Worker] ✓ Connected to camera buffer")
         except FileNotFoundError:
-            print(f"[Worker] ✗ ERROR: Buffer not found!")
+            print(f"[Worker] ✗ ERROR: Camera buffer not found!")
             print(f"[Worker] Start run_hri_demo.py with --enable_cameras first\n")
+            raise
+
+        # Create result buffer (producer)
+        print(f"[Worker] Creating result buffer '{result_buffer_name}'...")
+        try:
+            self.result_buffer = SharedResultBuffer(
+                name=result_buffer_name, create=True
+            )
+            print(f"[Worker] ✓ Result buffer created\n")
+        except Exception as e:
+            print(f"[Worker] ✗ ERROR creating result buffer: {e}\n")
             raise
 
         # Graceful shutdown
@@ -134,7 +152,14 @@ class MaterialDetectorWorker:
                 print(f"  Inference:  {result['inference_time']*1000:.1f}ms")
                 print("-" * 70)
 
-                # TODO: Write result to shared buffer for run_hri_demo.py to read
+                # Write result to shared buffer for run_hri_demo.py to read
+                self.result_buffer.write_json(
+                    {
+                        "material_type": result["material_type"],
+                        "confidence": result["confidence"],
+                        "inference_time": result["inference_time"],
+                    }
+                )
 
                 time.sleep(poll_interval)
 
@@ -148,6 +173,8 @@ class MaterialDetectorWorker:
                 break
 
         self.buffer.close()
+        self.result_buffer.close()
+        self.result_buffer.unlink()  # Clean up result buffer
 
 
 if __name__ == "__main__":
