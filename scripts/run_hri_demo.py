@@ -61,6 +61,7 @@ except ImportError:
 # Camera and VLM Integration
 from isaaclab.sensors import CameraCfg, Camera
 from shared_buffer import SharedImageBuffer
+from shared_result_buffer import SharedResultBuffer
 from camera_utils import add_camera_to_scene, save_camera_image
 from isaaclab.sensors import FrameTransformerCfg
 from isaaclab.sensors.frame_transformer import OffsetCfg
@@ -116,16 +117,20 @@ Z_MOVE_INCREMENT = 0.02  # 2cm per arrow key press
 Z_MIN_LIMIT = 0.45  # Don't go too low (collision)
 Z_MAX_LIMIT = 0.70  # Don't go too high (reach limit)
 
-# ORACLE BENCHMARK (Day 2.5)
-g_oracle_mode = False  # Toggle with 'O'
-g_penalty_mode = False  # Toggle with 'P'
+###############################
+# GLOBAL CONTROL VARIABLES
+###############################
 
-# VLM MODE (Day 3)
-g_vlm_mode = False  # Toggle with 'V'
+# MODE TOGGLES
+g_oracle_mode = False  # Ground truth material detection (blade tip position)
+g_vlm_mode = False  # Vision-based material detection (from VLM worker)
+g_penalty_mode = False  # Wrong stiffness for testing
+
+# Smooth stiffness (ramped over time)
+g_smoothed_stiffness = 500.0  # Start at soft_wood baseline
 g_detected_material = "soft_wood"  # Updated by VLM worker, default to soft
 
 # STIFFNESS SMOOTHING (Stability Fix)
-g_smoothed_stiffness = 500.0  # Start at soft_wood baseline
 g_prev_target_y = 0.0  # For velocity calculation
 STIFFNESS_RAMP_RATE = (
     2.0  # Max change per step (N/m per 10ms) -> 200 N/m/s (Slower for lighter saw)
@@ -240,22 +245,17 @@ def _on_keyboard_event(event, saw_object: RigidObject):
     """Callback to apply force to the saw object and control Y/Z position"""
     global g_human_saw_force_cmd_ee, g_force_magnitude, g_downward_force_target
     global g_target_y_position, g_target_z_position, g_oracle_mode, g_penalty_mode
-    global g_vlm_mode, g_detected_material, g_debug_mode, g_downward_force_applied
-    global g_smoothed_stiffness, g_prev_target_y, g_prev_target_y
+    global g_vlm_mode, g_downward_force_applied, g_smoothed_stiffness, g_prev_target_y
 
     # Handle Ctrl+C for clean shutdown
     import signal
-    import sys  # sys import needed for sys.exit
 
     def signal_handler(sig, frame):
         print("\n[Ctrl+C] Shutting down...")
-        # Simulation app will handle exit, but we ensure buffer is cleaned in finally block
-        # Assuming 'simulation_app' is accessible or passed, otherwise this line might need adjustment
-        # For now, commenting out as simulation_app is not in scope here.
-        # simulation_app.close()
-        sys.exit(0)
+        # NOTE: Can't call simulation_app.close() from here as it's not in scope
+        # The finally block will handle cleanup when the program exits
 
-    signal.signal(signal.SIGINT, signal_handler)  # Corrected signal registration
+    signal.signal(signal.SIGINT, signal_handler)
 
     if event.type in (
         carb.input.KeyboardEventType.KEY_PRESS,
@@ -315,13 +315,11 @@ def _on_keyboard_event(event, saw_object: RigidObject):
             print(f"[ORACLE] Mode {status}")
         elif event.input == carb.input.KeyboardInput.P:
             # Toggle Penalty Mode
-            global g_penalty_mode
             g_penalty_mode = not g_penalty_mode
             status = "ENABLED" if g_penalty_mode else "DISABLED"
             print(f"[PENALTY] Mode {status}")
         elif event.input == carb.input.KeyboardInput.V:
             # Toggle VLM Mode
-            global g_vlm_mode
             g_vlm_mode = not g_vlm_mode
             status = "ENABLED" if g_vlm_mode else "DISABLED"
             print(f"[VLM] Mode {status}")
@@ -590,7 +588,8 @@ def main():
     print(f"Successfully spawned log (knot zone): {log.cfg.prim_path}")
     print(f"Successfully spawned camera: {camera.cfg.prim_path}")
 
-    # --- Initialize Shared Memory Buffer for VLM ---
+    # --- Initialize Shared Memory Buffers for VLM ---
+    # Camera buffer (already created)
     shared_buffer = SharedImageBuffer(
         name="hri_camera_buffer",
         buffer_size=10,
@@ -599,7 +598,20 @@ def main():
         channels=3,
         create=True,
     )
-    print("[SharedBuffer] Initialized for camera→VLM communication")
+    print("[SharedBuffer] Initialized camera buffer for VLM communication")
+
+    # VLM result buffer (consumer mode - VLM worker creates it)
+    try:
+        vlm_result_buffer = SharedResultBuffer(
+            name="vlm_results",
+            create=False,  # Consumer mode - attach to existing buffer
+        )
+        print("[SharedBuffer] Connected to VLM result buffer")
+    except FileNotFoundError:
+        print(
+            "[SharedBuffer] VLM result buffer not found - VLM worker not running (OK)"
+        )
+        vlm_result_buffer = None  # Will check for None before reading
     # --- End Buffer Init ---  # NEW
 
     sim_dt = sim.get_physics_dt()
@@ -856,12 +868,26 @@ def main():
 
             # --- ORACLE BENCHMARK LOGIC (Day 2.5) + VLM MODE (Day 3) ---
             if g_oracle_mode or g_vlm_mode:
-                # 1. Get Material (Oracle or VLM)
+                # 1. Get Material (Oracle, VLM, or Penalty)
                 if g_vlm_mode:
-                    # VLM MODE: Use vision-detected material
-                    zone_name = g_detected_material
+                    # VLM MODE: Use vision-detected material from worker
+                    if vlm_result_buffer is not None:
+                        vlm_result = vlm_result_buffer.read_latest_json()
+                        if vlm_result and vlm_result.get("material_type"):
+                            zone_name = vlm_result["material_type"]
+                            confidence = vlm_result.get("confidence", 0.0)
+                        # props = MATERIAL_ZONES[zone_name]
+                        else:
+                            # Fallback if no VLM data available
+                            zone_name = "soft_wood"
+                            confidence = 0.0
+                    else:
+                        # VLM worker not running
+                        zone_name = "soft_wood"
+                        confidence = 0.0
+
                     props = MATERIAL_ZONES[zone_name]
-                else:
+                elif g_oracle_mode:
                     # ORACLE MODE: Use ground truth position
                     # Use BLADE TIP Y in World Frame
                     # This is calculated fresh each frame from saw position + rotation
@@ -945,7 +971,12 @@ def main():
 
                 # Debug Print
                 if frame_count % 30 == 0:
-                    mode_str = "PENALTY" if g_penalty_mode else "ORACLE"
+                    if g_vlm_mode:
+                        mode_str = "VLM"
+                    elif g_penalty_mode:
+                        mode_str = "PENALTY"
+                    else:
+                        mode_str = "ORACLE"
                     print(
                         f"[{mode_str}] Zone: {zone_name.upper()} | Force: {current_human_force:.1f}/{target_force_limit:.1f}N | Target K: {target_stiffness:.0f} | Actual K: {g_smoothed_stiffness:.0f}"
                     )
@@ -1132,11 +1163,16 @@ def main():
         traceback.print_exc()  # --- END CAMERA CAPTURE ---
 
     finally:
-        # Clean up shared memory buffer
+        # Clean up shared memory buffers
         if "shared_buffer" in locals():
-            print("[SharedBuffer] Cleaning up...")
+            print("[SharedBuffer] Cleaning up camera buffer...")
             shared_buffer.close()
             shared_buffer.unlink()
+
+        if "vlm_result_buffer" in locals() and vlm_result_buffer is not None:
+            print("[SharedBuffer] Cleaning up VLM result buffer...")
+            vlm_result_buffer.close()
+            # Don't unlink - VLM worker owns this buffer
 
         # --- CLEANUP ---
         if (
