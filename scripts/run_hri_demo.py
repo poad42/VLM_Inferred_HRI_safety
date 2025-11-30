@@ -57,7 +57,10 @@ except ImportError:
     print("[WARNING] omni.isaac.debug_draw not found. HUD will be disabled.")
     _debug_draw = None
 
-# from isaaclab.sensors import CameraCfg # REMOVED CAMERA
+# Camera and VLM Integration
+from isaaclab.sensors import CameraCfg, Camera
+from shared_buffer import SharedImageBuffer
+from camera_utils import add_camera_to_scene, save_camera_image
 from isaaclab.sensors import FrameTransformerCfg
 from isaaclab.sensors.frame_transformer import OffsetCfg
 from isaaclab.controllers import (
@@ -526,7 +529,20 @@ def main():
 
     print(f"Successfully spawned robot: {robot.cfg.prim_path}")
     print(f"Successfully spawned saw: {saw.cfg.prim_path}")
-    print(f"Successfully spawned camera: {camera.cfg.prim_path}")  # NEW
+    print(f"Successfully spawned log (knot zone): {log.cfg.prim_path}")
+    print(f"Successfully spawned camera: {camera.cfg.prim_path}")
+
+    # --- Initialize Shared Memory Buffer for VLM ---
+    shared_buffer = SharedImageBuffer(
+        name="hri_camera_buffer",
+        buffer_size=10,
+        height=480,
+        width=640,
+        channels=3,
+        create=True,
+    )
+    print("[SharedBuffer] Initialized for camera→VLM communication")
+    # --- End Buffer Init ---  # NEW
 
     sim_dt = sim.get_physics_dt()
 
@@ -935,6 +951,34 @@ def main():
             robot.set_joint_effort_target(joint_efforts, joint_ids=arm_joint_ids)
             robot.write_data_to_sim()
 
+            # --- Camera capture: Write to shared memory buffer ---
+            if frame_count % 30 == 0:  # Every 30 frames (~0.3s at 100Hz = ~3 FPS)
+                try:
+                    if (
+                        not hasattr(camera.data, "output")
+                        or "rgb" not in camera.data.output
+                    ):
+                        pass
+                    else:
+                        rgb_data = camera.data.output["rgb"]
+                        if rgb_data is not None:
+                            rgb_np = rgb_data[0].cpu().numpy()
+                            if rgb_np.dtype in (np.float32, np.float64):
+                                rgb_np = (np.clip(rgb_np, 0, 1) * 255).astype(np.uint8)
+                            if rgb_np.shape[2] == 4:
+                                rgb_np = rgb_np[:, :, :3]
+                            shared_buffer.write(rgb_np)
+                            if frame_count % 300 == 0:  # Print every 3 seconds
+                                stats = shared_buffer.get_stats()
+                                print(
+                                    f"[Camera→Buffer] Frame {frame_count} → Buffer #{stats['frame_count']}"
+                                )
+                except Exception as e:
+                    if frame_count % 300 == 0:
+                        print(f"[Camera→Buffer Error] {e}")
+            frame_count += 1
+            # --- END CAMERA CAPTURE ---
+
             # --- NEW: Camera capture logic ---
             if frame_count % capture_every == 0:
                 save_camera_image(camera, frame_count)
@@ -1002,7 +1046,13 @@ def main():
         traceback.print_exc()  # --- END CAMERA CAPTURE ---
 
     finally:
-        # --- Unsubscribe the global function ---
+        # Clean up shared memory buffer
+        if "shared_buffer" in locals():
+            print("[SharedBuffer] Cleaning up...")
+            shared_buffer.close()
+            shared_buffer.unlink()
+
+        # --- CLEANUP ---
         if (
             "carb_input" in locals()
             and "keyboard_sub" in locals()
@@ -1012,11 +1062,9 @@ def main():
                 app_window.get_keyboard(), keyboard_sub
             )
 
-        # --- Detach on exit ---
         if "attachment_helper" in locals():
             attachment_helper._detach_saw_from_ee()
         print("KeyboardHandler shutdown and joint detached.")
-        # --- END ---
         simulation_app.close()
 
 
