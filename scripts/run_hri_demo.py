@@ -30,6 +30,7 @@ parser = argparse.ArgumentParser(
 parser.add_argument(
     "--num_envs", type=int, default=1, help="Number of environments to spawn."
 )
+parser.add_argument("--debug", action="store_true", help="Enable verbose debug output")
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
 args_cli.enable_cameras = True
@@ -89,7 +90,7 @@ from camera_utils import add_camera_to_scene, save_camera_image
 
 # --- END NEW IMPORTS ---
 
-from material_zones import get_material_at_position, material_to_stiffness
+from material_zones import get_material_at_position, MATERIAL_ZONES
 
 # --- KEYBOARD IMPL (IMPLEMENTATION PLAN SECTION 6) ---
 # Force command in EE frame [fx, fy, fz]
@@ -119,10 +120,15 @@ Z_MAX_LIMIT = 0.70  # Don't go too high (reach limit)
 g_oracle_mode = False  # Toggle with 'O'
 g_penalty_mode = False  # Toggle with 'P'
 
+# VLM MODE (Day 3)
+g_vlm_mode = False  # Toggle with 'V'
+g_detected_material = "soft_wood"  # Updated by VLM worker, default to soft
+
 # STIFFNESS SMOOTHING (Stability Fix)
-g_smoothed_stiffness = 400.0  # Start at baseline
+g_smoothed_stiffness = 500.0  # Start at soft_wood baseline
+g_prev_target_y = 0.0  # For velocity calculation
 STIFFNESS_RAMP_RATE = (
-    5.0  # Max change per step (N/m per 10ms) -> 500 N/m/s (Slower for stability)
+    2.0  # Max change per step (N/m per 10ms) -> 200 N/m/s (Slower for lighter saw)
 )
 
 
@@ -232,7 +238,24 @@ class AttachmentHelper:
 # --- KEYBOARD HANDLER (IMPLEMENTATION PLAN SECTION 6.1) ---
 def _on_keyboard_event(event, saw_object: RigidObject):
     """Callback to apply force to the saw object and control Y/Z position"""
-    global g_human_saw_force_cmd_ee, g_force_magnitude, g_downward_force_target, g_target_y_position, g_target_z_position, g_oracle_mode, g_penalty_mode
+    global g_human_saw_force_cmd_ee, g_force_magnitude, g_downward_force_target
+    global g_target_y_position, g_target_z_position, g_oracle_mode, g_penalty_mode
+    global g_vlm_mode, g_detected_material, g_debug_mode, g_downward_force_applied
+    global g_smoothed_stiffness, g_prev_target_y, g_prev_target_y
+
+    # Handle Ctrl+C for clean shutdown
+    import signal
+    import sys  # sys import needed for sys.exit
+
+    def signal_handler(sig, frame):
+        print("\n[Ctrl+C] Shutting down...")
+        # Simulation app will handle exit, but we ensure buffer is cleaned in finally block
+        # Assuming 'simulation_app' is accessible or passed, otherwise this line might need adjustment
+        # For now, commenting out as simulation_app is not in scope here.
+        # simulation_app.close()
+        sys.exit(0)
+
+    signal.signal(signal.SIGINT, signal_handler)  # Corrected signal registration
 
     if event.type in (
         carb.input.KeyboardEventType.KEY_PRESS,
@@ -292,9 +315,21 @@ def _on_keyboard_event(event, saw_object: RigidObject):
             print(f"[ORACLE] Mode {status}")
         elif event.input == carb.input.KeyboardInput.P:
             # Toggle Penalty Mode
+            global g_penalty_mode
             g_penalty_mode = not g_penalty_mode
             status = "ENABLED" if g_penalty_mode else "DISABLED"
             print(f"[PENALTY] Mode {status}")
+        elif event.input == carb.input.KeyboardInput.V:
+            # Toggle VLM Mode
+            global g_vlm_mode
+            g_vlm_mode = not g_vlm_mode
+            status = "ENABLED" if g_vlm_mode else "DISABLED"
+            print(f"[VLM] Mode {status}")
+            if g_vlm_mode:
+                print("Using vision-based material detection")
+                print(f"Current detected material: {g_detected_material}")
+            else:
+                print("Switched back to Oracle/manual control")
         # --- REMOVED 'T' KEY ---
 
     elif event.type == carb.input.KeyboardEventType.KEY_RELEASE:
@@ -356,6 +391,23 @@ def update_states(robot: Articulation, ee_frame_idx: int, arm_joint_ids: list[in
 
 
 def main():
+    # Global variables
+    global g_target_y_position, g_target_z_position, g_force_magnitude
+    global g_oracle_mode, g_penalty_mode, g_vlm_mode, g_detected_material
+    global g_debug_mode, g_downward_force_applied, g_smoothed_stiffness
+    global g_prev_target_y
+
+    # Handle Ctrl+C for clean shutdown
+    import signal
+    import sys
+
+    def signal_handler(sig, frame):
+        print("\n[Ctrl+C] Shutting down...")
+        # Simulation app will handle exit, but we ensure buffer is cleaned in finally block
+        sys.exit(0)
+
+    signal.signal(signal.SIGINT, signal_handler)
+
     sim_cfg = SimulationCfg(dt=0.01, device=args_cli.device)
     sim = SimulationContext(sim_cfg)
     sim.set_camera_view([1.5, 1.5, 1.5], [0.0, 0.0, 0.5])
@@ -393,20 +445,24 @@ def main():
     scene_cfg.saw = RigidObjectCfg(
         prim_path="{ENV_REGEX_NS}/Saw",
         spawn=sim_utils.CuboidCfg(
-            size=(0.7, 0.1, 0.02),  # (length, width, height)
+            size=(
+                0.5,
+                0.06,
+                0.015,
+            ),  # (length, width, height) - Reduced to avoid elbow collision
             visual_material=sim_utils.PreviewSurfaceCfg(
                 diffuse_color=(0.7, 0.7, 0.7), metallic=0.8
             ),
-            # PHYSICS FIX 1: Dynamic mode with negligible mass
+            # PHYSICS FIX 1: Realistic mass for small saw
             mass_props=sim_utils.MassPropertiesCfg(
-                mass=0.001
-            ),  # Negligible mass to prevent sagging
+                mass=0.2  # Realistic for small handsaw ~200g (was 0.001 - too light!)
+            ),
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
                 kinematic_enabled=False,  # Dynamic to allow movement and force application
                 disable_gravity=True,
                 max_depenetration_velocity=0.1,  # Prevent explosive ejection
-                solver_position_iteration_count=12,  # Increase from default 4
-                solver_velocity_iteration_count=4,  # Increase from default 1
+                solver_position_iteration_count=16,  # Increased for lighter object (was 12)
+                solver_velocity_iteration_count=6,  # Increased for lighter object (was 4)
             ),
             collision_props=sim_utils.CollisionPropertiesCfg(collision_enabled=True),
             # PHYSICS FIX 2: Material properties for stable contact
@@ -444,7 +500,8 @@ def main():
             ),
         ),
         init_state=RigidObjectCfg.InitialStateCfg(
-            pos=(0.45, -0.25, 0.4), rot=(0.707, 0.0, 0.0, 0.707)
+            pos=(0.58, -0.25, 0.4),  # Moved to 0.58m (further back)
+            rot=(0.707, 0.0, 0.0, 0.707),
         ),
     )
 
@@ -465,7 +522,8 @@ def main():
             ),
         ),
         init_state=RigidObjectCfg.InitialStateCfg(
-            pos=(0.45, 0.0, 0.4), rot=(0.707, 0.0, 0.0, 0.707)
+            pos=(0.58, 0.0, 0.4),  # Moved to 0.58m (further back)
+            rot=(0.707, 0.0, 0.0, 0.707),
         ),
     )
 
@@ -484,7 +542,8 @@ def main():
             ),
         ),
         init_state=RigidObjectCfg.InitialStateCfg(
-            pos=(0.45, 0.25, 0.4), rot=(0.707, 0.0, 0.0, 0.707)
+            pos=(0.58, 0.25, 0.4),  # Moved to 0.58m (further back)
+            rot=(0.707, 0.0, 0.0, 0.707),
         ),
     )
 
@@ -503,9 +562,8 @@ def main():
                 name="ee_tcp",
                 offset=OffsetCfg(
                     # TCP offset from panda_hand to saw blade center
-                    # Saw is 0.7m long, attached at handle (one end)
-                    # Blade center is ~0.35m from attachment point
-                    pos=(0.35, 0.0, 0.0),
+                    # Saw is 0.5m long. Centering attachment.
+                    pos=(0.0, 0.0, 0.0),
                     # Match saw rotation: RotX(-90°)
                     rot=(0.707107, -0.707107, 0.0, 0.0),
                 ),
@@ -564,8 +622,14 @@ def main():
     print(" U:   Increase force magnitude (+5 N)")
     print(" M:   Decrease force magnitude (-5 N)")
     print(" R:   Reset all forces to default")
-    print(" T:   Toggle REMOVED. Attached by default.")
-    print(" Camera: Capturing every 30 frames")
+    print(" LEFT/RIGHT: Traverse Y-axis (material zones)")
+    print(" UP/DOWN: Adjust Z-axis height")
+    print(" O:   Toggle Oracle Mode (ground truth)")
+    print(" P:   Toggle Penalty Mode (wrong stiffness)")
+    print(" V:   Toggle VLM Mode (vision-based)")
+    print(" Camera: Capturing every 30 frames (~3 FPS)")
+    if args_cli.debug:
+        print(" [DEBUG MODE ENABLED - Verbose output active]")
     print("--------------------")
     # --- END MODIFIED ---
 
@@ -601,9 +665,9 @@ def main():
         400.0,  # Translation X - reduced from 800 for stability
         400.0,  # Translation Y - reduced from 800 for stability
         200.0,  # Translation Z - increased from 100 to prevent sag
-        600.0,  # Rotation Roll - reduced from 1500 for stability
-        600.0,  # Rotation Pitch - reduced from 1500 for stability
-        400.0,  # Rotation Yaw - reduced from 600 for stability
+        300.0,  # Rotation Roll - reduced for lighter saw (was 600)
+        300.0,  # Rotation Pitch - reduced for lighter saw (was 600)
+        200.0,  # Rotation Yaw - reduced for lighter saw (was 400)
     )
 
     # Damping ratios per implementation plan (Section 5.2, Table 2)
@@ -612,12 +676,12 @@ def main():
     # Lower damping on Z-axis for compliance, higher on rotations for stability
     # UPDATED (User Request): Increased damping to prevent "swinging" and "flatness"
     default_damping_ratio_tuple = (
-        2.0,  # Translation X - overdamped
-        4.0,  # Translation Y - heavily overdamped (prevent swing)
-        1.0,  # Translation Z - critically damped (was 0.7)
-        5.0,  # Rotation Roll - very heavily overdamped (lock orientation)
-        5.0,  # Rotation Pitch - very heavily overdamped (lock orientation)
-        2.0,  # Rotation Yaw - overdamped
+        1.5,  # Translation X - reduced for lighter saw (was 2.0)
+        2.0,  # Translation Y - reduced for lighter saw (was 4.0)
+        1.0,  # Translation Z - critically damped
+        2.5,  # Rotation Roll - reduced for lighter saw (was 5.0)
+        2.5,  # Rotation Pitch - reduced for lighter saw (was 5.0)
+        1.5,  # Rotation Yaw - reduced for lighter saw (was 2.0)
     )
 
     osc_cfg = OperationalSpaceControllerCfg(
@@ -719,9 +783,9 @@ def main():
             saw_pos_w = saw.data.root_pos_w[0]  # Saw center of mass in world frame
             saw_quat_w = saw.data.root_quat_w[0]  # [w, x, y, z] in world frame
 
-            # Saw geometry: 0.7m (length) x 0.1m (width) x 0.02m (thickness)
+            # Saw geometry: 0.5m (length) x 0.06m (width) x 0.015m (thickness)
             # In saw's local frame: blade extends along X-axis
-            # The blade TIP (cutting edge) is at (+0.35, 0, 0) in saw's local frame
+            # The blade TIP (cutting edge) is at (+0.25, 0, 0) in saw's local frame
 
             # Transform blade tip offset through saw's rotation
             # Convert quaternion to rotation matrix for transformation
@@ -736,8 +800,8 @@ def main():
             saw_rotation = R.from_quat(quat_scipy)
 
             # Blade tip offset in saw's local frame
-            # TESTING: Try opposite end since +0.35 gives blade 33cm below log
-            blade_tip_local = torch.tensor([-0.35, 0.0, 0.0], device=saw_pos_w.device)
+            # Attached at center (0.0), so tip is at +0.25m (half length) - THE CUTTING END
+            blade_tip_local = torch.tensor([+0.25, 0.0, 0.0], device=saw_pos_w.device)
 
             # Transform to world frame
             blade_tip_offset_world = torch.tensor(
@@ -759,8 +823,8 @@ def main():
             # Apply proportional control to close the gap
             descent_gain = 0.3  # More conservative: 30% per step for stability
 
-            # Debug output every 10 frames
-            if frame_count % 10 == 0:
+            # Debug output (only if --debug flag is set)
+            if args_cli.debug and frame_count % 10 == 0:
                 print(f"\n--- SAW DESCENT DEBUG (Frame {frame_count}) ---")
                 print(f"Saw Center (World): {saw_pos_w.cpu().numpy()}")
                 print(f"Saw Quat (World): {saw_quat_w.cpu().numpy()}")
@@ -790,15 +854,50 @@ def main():
             current_stiffness[:, 2] = 200.0
             current_stiffness[:, 3:] = 1500.0
 
-            # --- ORACLE BENCHMARK LOGIC (Day 2.5) ---
-            if g_oracle_mode:
-                # 1. Get Ground Truth Position
-                # CRITICAL FIX: Use COMMANDED Y (g_target_y_position) instead of ACTUAL Y (saw_pos_w)
-                # Using actual Y creates a feedback loop: Swing -> Y changes -> Stiffness changes -> More swing
-                saw_y = g_target_y_position
+            # --- ORACLE BENCHMARK LOGIC (Day 2.5) + VLM MODE (Day 3) ---
+            if g_oracle_mode or g_vlm_mode:
+                # 1. Get Material (Oracle or VLM)
+                if g_vlm_mode:
+                    # VLM MODE: Use vision-detected material
+                    zone_name = g_detected_material
+                    props = MATERIAL_ZONES[zone_name]
+                else:
+                    # ORACLE MODE: Use ground truth position
+                    # Use BLADE TIP Y in World Frame
+                    # This is calculated fresh each frame from saw position + rotation
+                    # The blade tip is the actual cutting edge
+                    saw_y = blade_tip_world[
+                        1
+                    ].item()  # Blade tip Y in world coordinates
 
-                # 2. Query Material Zone
-                zone_name, props = get_material_at_position(saw_y)
+                    # EDGE DETECTION LOGIC:
+                    # Check material at the "leading edge" of the saw based on movement direction
+                    # Saw width is ~0.06m (radius 0.03m). We check 3cm ahead.
+                    y_velocity = 0.0
+                    if g_target_y_position > g_prev_target_y:
+                        y_velocity = 1.0  # Moving Right
+                    elif g_target_y_position < g_prev_target_y:
+                        y_velocity = -1.0  # Moving Left
+
+                    # Look ahead by 3cm (half saw width)
+                    check_y = saw_y + (y_velocity * 0.03)
+
+                    zone_name, props = get_material_at_position(check_y)
+
+                    # Update previous target for next frame
+                    g_prev_target_y = g_target_y_position
+
+                    # Oracle debug: Print zone detection (only with --debug flag)
+                    if args_cli.debug and frame_count % 30 == 0:
+                        commanded_y = g_target_y_position
+                        saw_center_y = saw_pos_w[1].item()
+                        blade_tip_y = blade_tip_world[1].item()
+                        blade_offset_y = blade_tip_offset_world[1].item()
+                        print(
+                            f"[ORACLE] Cmd={commanded_y:.3f} | Center={saw_center_y:.3f} | Offset={blade_offset_y:.3f} | TIP={blade_tip_y:.3f} → {zone_name.upper()} (K={props['recommended_stiffness']:.0f})"
+                        )
+
+                # 2. Get Target Stiffness
                 target_stiffness = props["recommended_stiffness"]
                 target_force_limit = props.get(
                     "target_force", 20.0
@@ -835,11 +934,10 @@ def main():
 
                 current_stiffness[:, :3] = g_smoothed_stiffness
 
-                # CRITICAL FIX: Enforce high rotational stiffness to prevent "swinging"
-                # The user reported "swings around like crazy", which means rotational control is too loose
-                current_stiffness[:, 3:] = (
-                    2000.0  # Increased from 1500.0 for extra stability
-                )
+                # ROTATIONAL STIFFNESS: Tuned for lighter saw
+                # Moderate stiffness balances stability with control
+                # Too high (2000) = overcorrection, too low (100) = drift
+                current_stiffness[:, 3:] = 500.0  # Middle ground for lighter saw weight
 
                 # Also increase damping for rotation (if possible via OSC config, but here we control stiffness)
                 # We can't easily change damping ratio dynamically in this script without accessing the cfg
@@ -881,44 +979,49 @@ def main():
             # Target Position:
             # Log Center = [0.45, 0.0, 0.4]
             # Zones: soft(Y=-0.25), knot(Y=0.0), crack(Y=0.25)
-            target_ee_pose_b[:, 0] = 0.45  # Fixed X (aligned with log)
+            target_ee_pose_b[:, 0] = 0.58  # Fixed X (0.58m - further back)
             # Y-AXIS TRAVERSAL: Use global target position (controlled by LEFT/RIGHT arrows)
             target_ee_pose_b[:, 1] = g_target_y_position
 
             # Target Z Calculation:
             # Saw Center at 0.0 (Attachment)
             # Log Top = 0.5m
-            # Blade Length = 0.35m (Half-length)
-            # If vertical, Tip is at Center - 0.35m
+            # Blade Length = 0.25m (Half-length)
+            # If vertical, Tip is at Center - 0.25m
             # We want Tip at 0.5m -> Center at 0.85m
             # EE Offset is approx 0.24m -> EE Z = 1.09m
             # Target Z Calculation:
             # Saw Center at 0.0 (Attachment)
             # Log Top = 0.5m
             # Saw Width = 0.1m (Vertical dimension now) -> Half-Width = 0.05m
-            # We want Bottom Edge at 0.5m -> Center at 0.55m
             # User wants it to "rest straight". Let's lower slightly to 0.53m
             # to ensure it sits firmly and flat.
             # Z-AXIS CONTROL: Use global target position (controlled by UP/DOWN arrows)
             target_ee_pose_b[:, 2] = g_target_z_position
 
-            # Debug output
-            if frame_count % 10 == 0:
+            # Calculate saw orientation (Euler angles for debugging)
+            from scipy.spatial.transform import Rotation as R_scipy
+
+            quat_scipy_saw = [
+                saw_quat_w[1].item(),
+                saw_quat_w[2].item(),
+                saw_quat_w[3].item(),
+                saw_quat_w[0].item(),
+            ]
+            saw_euler_deg = R_scipy.from_quat(quat_scipy_saw).as_euler(
+                "xyz", degrees=True
+            )
+
+            # Debug output (only if --debug flag is set)
+            if args_cli.debug and frame_count % 10 == 0:
                 print(f"\n--- KINEMATIC SAW DEBUG (Frame {frame_count}) ---")
                 print(f"Target EE: {target_ee_pose_b[0, :3].cpu().numpy()}")
-                print(f"Target Quat: {target_ee_pose_b[0, 3:].cpu().numpy()}")
+                print(f"Target Quat: {target_ee_pose_b[0, 3:7].cpu().numpy()}")
                 print(f"Actual EE: {ee_pose_b[0, :3].cpu().numpy()}")
                 print(f"Saw Center: {saw_pos_w.cpu().numpy()}")
-
-                # Calculate Attachment Error (Distance between EE and Saw Center)
-                dist = torch.norm(saw_pos_w - ee_pose_b[0, :3])
-                print(f"Attachment Dist (Joint Error): {dist:.4f}m")
-
-                # Print Saw Orientation (Euler) to verify vertical
-                saw_euler = R.from_quat(saw_quat_w.cpu().numpy()).as_euler(
-                    "xyz", degrees=True
-                )
-                print(f"Saw Euler (deg): {saw_euler}")
+                attachment_dist = torch.norm(ee_pose_b[0, :3] - saw_pos_w)
+                print(f"Attachment Dist (Joint Error): {attachment_dist:.4f}m")
+                print(f"Saw Euler (deg): {saw_euler_deg}")
 
             # Z-compliance shift: Based on dynamic stiffness
             # This creates a "virtual spring" that generates force proportional to displacement
@@ -984,8 +1087,8 @@ def main():
                 save_camera_image(camera, frame_count)
             frame_count += 1
 
-            # --- COMPREHENSIVE DEBUG OUTPUT (EVERY FRAME) ---
-            if True:  # Always print for debugging
+            # --- COMPREHENSIVE DEBUG OUTPUT (ENABLE WITH --debug FLAG) ---
+            if args_cli.debug:
                 # Calculate orientation error (quaternion difference)
                 from isaaclab.utils.math import quat_error_magnitude
 
@@ -1008,23 +1111,6 @@ def main():
                 # Applied force
                 force_magnitude = torch.norm(force_world[0])
 
-                print(f"\n========== FRAME {frame_count} DEBUG ==========")
-                print("TARGET EE:")
-                print(f"  Pos: {target_ee_pose_b[0, :3].cpu().numpy()}")
-                print(f"  Quat: {target_ee_pose_b[0, 3:7].cpu().numpy()}")
-                print("\nACTUAL EE:")
-                print(f"  Pos: {ee_pose_b[0, :3].cpu().numpy()}")
-                print(f"  Quat: {ee_pose_b[0, 3:7].cpu().numpy()}")
-                print("\nEE ERROR:")
-                print(f"  Position Error: {ee_pos_error[0].item():.4f} m")
-                print(f"  Orientation Error: {ee_quat_error[0].item():.4f} rad")
-                print("\nSAW STATE:")
-                print(f"  Pos (World): {saw_pos_w.cpu().numpy()}")
-                print(f"  Quat (World): {saw_quat_w.cpu().numpy()}")
-                print("\nLOG STATE:")
-                print(f"  Pos (World): {log_pos_w.cpu().numpy()}")
-                print(f"  Quat (World): {log_quat_w.cpu().numpy()}")
-                print("\nFORCES APPLIED:")
                 print(
                     f"  Human Force (World): {force_world[0].cpu().numpy()} ({force_magnitude.item():.2f}N)"
                 )

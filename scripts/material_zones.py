@@ -9,26 +9,26 @@ Defines visual and physical properties of different wood sections.
 
 MATERIAL_ZONES = {
     "soft_wood": {
-        "y_range": (-0.40, -0.15),  # Left section
+        "y_range": (-0.50, -0.15),  # Left section (extended to edge)
         "color": (0.7, 0.5, 0.3),  # Light tan
         "friction": 0.3,  # Low resistance
-        "recommended_stiffness": 500.0,
+        "recommended_stiffness": 500.0,  # Increased for better tracking (was 300)
         "target_force": 10.0,  # N (Ideal cutting force)
         "description": "Soft pine, easy cutting",
     },
     "knot": {
-        "y_range": (-0.15, 0.15),  # Middle section
+        "y_range": (-0.15, 0.15),  # Middle section (contiguous)
         "color": (0.4, 0.25, 0.15),  # Dark brown
         "friction": 0.9,  # High resistance
-        "recommended_stiffness": 600.0,
+        "recommended_stiffness": 700.0,  # Increased for better tracking (was 400)
         "target_force": 40.0,  # N (Requires more force)
         "description": "Hard knot, dense grain",
     },
     "cracked": {
-        "y_range": (0.15, 0.40),  # Right section
+        "y_range": (0.15, 0.50),  # Right section (extended to edge)
         "color": (0.6, 0.4, 0.2),  # Medium brown with visual cracks
         "friction": 0.2,  # Very low (weak structure)
-        "recommended_stiffness": 400.0,
+        "recommended_stiffness": 600.0,  # Increased for better tracking (was 350)
         "target_force": 5.0,  # N (Gentle handling required)
         "description": "Cracked section, will split easily",
     },
