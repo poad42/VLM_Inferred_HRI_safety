@@ -19,7 +19,6 @@ This script has been modified to include runtime dynamic attachment.
 
 import argparse
 from isaaclab.app import AppLauncher
-import copy
 import torch
 import numpy as np
 
@@ -59,7 +58,6 @@ except ImportError:
     _debug_draw = None
 
 # Camera and VLM Integration
-from isaaclab.sensors import CameraCfg, Camera
 from shared_buffer import SharedImageBuffer
 from shared_result_buffer import SharedResultBuffer
 from camera_utils import add_camera_to_scene, save_camera_image
@@ -74,7 +72,6 @@ from isaaclab.utils.math import (
     quat_inv,
     subtract_frame_transforms,
     quat_apply_inverse,
-    combine_frame_transforms,
     quat_apply,
 )
 import carb.input
@@ -85,9 +82,6 @@ from isaaclab_assets import FRANKA_PANDA_HIGH_PD_CFG
 # --- NEW ATTACHMENT IMPORT (v11 FIX) ---
 import omni.physx.scripts.physicsUtils
 import omni.usd
-import omni.physx.scripts.physicsUtils
-import omni.usd
-from camera_utils import add_camera_to_scene, save_camera_image
 
 # --- END NEW IMPORTS ---
 
@@ -549,11 +543,51 @@ def main():
     add_camera_to_scene(scene_cfg)
     # --- END CAMERA ADDITION ---
 
+    # --- DEBUG: Add visual marker at camera position ---
+    scene_cfg.camera_marker = RigidObjectCfg(
+        prim_path="{ENV_REGEX_NS}/CameraMarker",
+        spawn=sim_utils.SphereCfg(
+            radius=0.05,  # 5cm sphere
+            visual_material=sim_utils.PreviewSurfaceCfg(
+                diffuse_color=(1.0, 1.0, 0.0),  # Bright yellow
+                emissive_color=(0.5, 0.5, 0.0),  # Glowing
+            ),
+            rigid_props=sim_utils.RigidBodyPropertiesCfg(
+                kinematic_enabled=True, disable_gravity=True
+            ),
+            collision_props=sim_utils.CollisionPropertiesCfg(collision_enabled=False),
+        ),
+        init_state=RigidObjectCfg.InitialStateCfg(
+            pos=(0.6, 0.0, 1.5),  # Match camera at 1.5m
+        ),
+    )
+    # --- END DEBUG MARKER ---
+
+    # --- SAW TIP TRACKER: Visual marker for VLM tracking ---
+    scene_cfg.saw_tip_marker = RigidObjectCfg(
+        prim_path="{ENV_REGEX_NS}/SawTipMarker",
+        spawn=sim_utils.SphereCfg(
+            radius=0.02,  # 2cm sphere - small but visible
+            visual_material=sim_utils.PreviewSurfaceCfg(
+                diffuse_color=(0.0, 1.0, 1.0),  # Bright cyan
+                emissive_color=(0.0, 0.5, 0.5),  # Glowing cyan
+            ),
+            rigid_props=sim_utils.RigidBodyPropertiesCfg(
+                kinematic_enabled=True, disable_gravity=True
+            ),
+            collision_props=sim_utils.CollisionPropertiesCfg(collision_enabled=False),
+        ),
+        init_state=RigidObjectCfg.InitialStateCfg(
+            pos=(0.5, 0.0, 0.5),  # Initial position (will be updated each frame)
+        ),
+    )
+    # --- END SAW TIP TRACKER ---
+
     # --- FRAME CALIBRATION: Add FrameTransformer for TCP visualization ---
     # This visualizes the tool center point (TCP) offset for calibration
     scene_cfg.ee_frame = FrameTransformerCfg(
         prim_path="{ENV_REGEX_NS}/Robot/panda_link0",
-        debug_vis=True,  # Show RGB axes in viewport
+        debug_vis=False,  # Hide RGB axes arrows from camera view
         target_frames=[
             FrameTransformerCfg.FrameCfg(
                 prim_path="{ENV_REGEX_NS}/Robot/panda_hand",
@@ -576,6 +610,7 @@ def main():
     saw = scene["saw"]
     log = scene["log_knot"]  # Use middle zone (knot) as primary log reference
     camera = scene["camera"]  # NEW: Get camera reference
+    saw_tip_marker = scene["saw_tip_marker"]  # Visual tracker for VLM
 
     # --- MODIFIED (v12) ---
     # Instantiate the helper, passing the sim object.
@@ -587,6 +622,68 @@ def main():
     print(f"Successfully spawned saw: {saw.cfg.prim_path}")
     print(f"Successfully spawned log (knot zone): {log.cfg.prim_path}")
     print(f"Successfully spawned camera: {camera.cfg.prim_path}")
+
+    # DEBUG: Print camera position and orientation
+    camera_pos = camera.cfg.offset.pos
+    camera_quat = camera.cfg.offset.rot
+    print(f"\n{'='*70}")
+    print(f"[DEBUG] CAMERA FRAME INFORMATION")
+    print(f"{'='*70}")
+    print(f"Camera Position (World): {camera_pos}")
+    print(f"Camera Quaternion (w,x,y,z): {camera_quat}")
+    print(f"Yellow marker sphere at: {camera_pos}")
+    print(f"Log position (World): (0.58, -0.25 to 0.25, 0.4)")
+
+    # Calculate and print camera orientation vectors
+    from scipy.spatial.transform import Rotation as R
+
+    quat_scipy = [
+        camera_quat[1],
+        camera_quat[2],
+        camera_quat[3],
+        camera_quat[0],
+    ]  # (w,x,y,z) -> (x,y,z,w)
+    camera_rotation = R.from_quat(quat_scipy)
+    rot_matrix = camera_rotation.as_matrix()
+
+    # Camera frame axes in world coordinates
+    camera_forward = rot_matrix[:, 2]  # Z-axis (forward/viewing direction)
+    camera_right = rot_matrix[:, 0]  # X-axis (right)
+    camera_up = rot_matrix[:, 1]  # Y-axis (up)
+
+    print(f"\nCamera Frame Axes (in World coordinates):")
+    print(f"  Forward (Z-axis, viewing direction): {camera_forward}")
+    print(f"  Right   (X-axis): {camera_right}")
+    print(f"  Up      (Y-axis): {camera_up}")
+
+    # Log position relative to camera
+    log_pos_world = np.array([0.58, 0.0, 0.4])  # Center of log
+    camera_pos_np = np.array(camera_pos)
+    log_relative_to_camera_world = log_pos_world - camera_pos_np
+    log_relative_to_camera_frame = camera_rotation.inv().apply(
+        log_relative_to_camera_world
+    )
+
+    print(f"\nLog Center Position:")
+    print(f"  World frame: {log_pos_world}")
+    print(f"  Relative to camera (World): {log_relative_to_camera_world}")
+    print(f"  Relative to camera (Camera frame): {log_relative_to_camera_frame}")
+    print(f"    (In camera frame: X=right, Y=up, Z=forward)")
+
+    if camera_forward[2] < -0.5:  # Pointing significantly downward
+        print(
+            f"\n✓ Camera appears to be pointing DOWN (Z-component: {camera_forward[2]:.3f})"
+        )
+    elif camera_forward[2] > 0.5:  # Pointing significantly upward
+        print(
+            f"\n✗ Camera appears to be pointing UP (Z-component: {camera_forward[2]:.3f})"
+        )
+    else:
+        print(
+            f"\n⚠ Camera appears to be pointing SIDEWAYS (Z-component: {camera_forward[2]:.3f})"
+        )
+
+    print(f"{'='*70}\n")
 
     # --- Initialize Shared Memory Buffers for VLM ---
     # Camera buffer (already created)
@@ -825,6 +922,18 @@ def main():
             # Blade tip position in world frame
             blade_tip_world = saw_pos_w + blade_tip_offset_world
             blade_tip_z = blade_tip_world[2]
+
+            # UPDATE SAW TIP MARKER: Move cyan sphere to blade tip for VLM tracking
+            saw_tip_marker_pos = blade_tip_world.clone()
+            saw_tip_marker_rot = torch.tensor(
+                [1.0, 0.0, 0.0, 0.0], device=saw_pos_w.device
+            )  # Identity rotation
+            saw_tip_marker.write_root_pose_to_sim(
+                torch.cat(
+                    [saw_tip_marker_pos.unsqueeze(0), saw_tip_marker_rot.unsqueeze(0)],
+                    dim=-1,
+                )
+            )
 
             # Log surface (top): Z = 0.4 (center) + 0.1 (half height) = 0.5m
             log_surface_z = 0.5

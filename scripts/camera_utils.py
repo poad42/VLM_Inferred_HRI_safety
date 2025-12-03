@@ -7,15 +7,14 @@ from isaaclab.sensors import CameraCfg, Camera
 
 def add_camera_to_scene(scene_cfg):
     """
-    Adds a camera configuration to the scene config.
-    Matches the GUI camera perspective.
+    Camera setup - using 180° X-rotation to point down.
     """
     scene_cfg.camera = CameraCfg(
         prim_path="{ENV_REGEX_NS}/Camera",
-        update_period=0,  # Update every frame
+        update_period=0,
         offset=CameraCfg.OffsetCfg(
-            pos=(0.5, 4.0, 0.75),  # Same as sim.set_camera_view
-            rot=(0.7071, 0.0, 0.0, -0.7071),  # Looking down at the scene
+            pos=(0.6, 0.0, 1.5),  # Raised to 1.5m for wider view
+            rot=(0.7071, 0.0, 0.7071, 0.0),  # 90° around Y-axis
             convention="world",
         ),
         spawn=sim_utils.PinholeCameraCfg(

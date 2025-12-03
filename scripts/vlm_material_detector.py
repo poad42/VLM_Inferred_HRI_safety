@@ -15,9 +15,26 @@ Usage:
 
 import time
 import signal
-import sys
+import os
+from pathlib import Path
+import numpy as np
 from shared_buffer import SharedImageBuffer
 from shared_result_buffer import SharedResultBuffer
+
+try:
+    from PIL import Image, ImageDraw
+
+    HAS_PIL = True
+except ImportError:
+    HAS_PIL = False
+    print("[Warning] PIL not available, falling back to cv2 for image saving")
+    try:
+        import cv2
+
+        HAS_CV2 = True
+    except ImportError:
+        HAS_CV2 = False
+        print("[Warning] Neither PIL nor cv2 available, image saving disabled")
 
 
 # Placeholder for VLM model - replace with actual SmolVLA
@@ -28,7 +45,7 @@ class MaterialVLM:
         self.device = device
         print(f"[VLM] Initializing material classifier on {device}...")
         # TODO: Load actual SmolVLA model here
-        print(f"[VLM] ✓ Model loaded")
+        print("[VLM] ✓ Model loaded")
 
     def classify_material(self, image_np):
         """
@@ -64,15 +81,32 @@ class MaterialDetectorWorker:
         buffer_name="hri_camera_buffer",
         result_buffer_name="vlm_results",
         device="cuda",
+        save_images=True,
+        debug_dir="vlm_debug_images",
+        max_saved_images=10,
     ):
         self.buffer_name = buffer_name
         self.result_buffer_name = result_buffer_name
         self.running = True
         self.last_frame_count = -1
+        self.save_images = save_images and (HAS_PIL or HAS_CV2)
+        self.debug_dir = Path(debug_dir)
+        self.max_saved_images = max_saved_images
 
         print("\n" + "=" * 70)
         print("VLM Material Detector")
         print("=" * 70)
+
+        # Set up debug directory
+        if self.save_images:
+            self.debug_dir.mkdir(exist_ok=True)
+            print(
+                f"\n[Worker] Debug images will be saved to: {self.debug_dir.absolute()}"
+            )
+            # Clean old images
+            self._clean_old_images()
+        else:
+            print(f"\n[Worker] ⚠ Image saving disabled (install PIL or cv2)")
 
         # Initialize VLM
         self.vlm = MaterialVLM(device=device)
@@ -112,6 +146,84 @@ class MaterialDetectorWorker:
         print(f"\n[Worker] Shutting down...")
         self.running = False
 
+    def _clean_old_images(self):
+        """Remove old debug images, keeping only the most recent ones."""
+        if not self.debug_dir.exists():
+            return
+
+        image_files = sorted(self.debug_dir.glob("frame_*.png"), key=os.path.getmtime)
+
+        # Remove oldest files if we exceed max
+        if len(image_files) > self.max_saved_images:
+            for old_file in image_files[: -self.max_saved_images]:
+                old_file.unlink()
+                print(f"[Worker] Removed old debug image: {old_file.name}")
+
+    def _save_debug_image(self, image_np, frame_count, metadata):
+        """Save debug image with annotations."""
+        if not self.save_images:
+            return
+
+        timestamp = time.strftime("%Y%m%d_%H%M%S")
+        filename = self.debug_dir / f"frame_{frame_count:06d}_{timestamp}.png"
+
+        try:
+            if HAS_PIL:
+                # Use PIL to save and annotate
+                img = Image.fromarray(image_np.astype(np.uint8))
+                draw = ImageDraw.Draw(img)
+
+                # Add text annotation
+                text_lines = [
+                    f"Frame: {frame_count}",
+                    f"Time: {timestamp}",
+                    f"Shape: {image_np.shape}",
+                ]
+
+                # Draw background for text readability
+                y_offset = 10
+                for line in text_lines:
+                    # Simple text (no font loading issues)
+                    draw.text((10, y_offset), line, fill=(0, 255, 0))
+                    y_offset += 20
+
+                img.save(filename)
+            elif HAS_CV2:
+                # Use cv2 to save (BGR format)
+                img_bgr = cv2.cvtColor(image_np.astype(np.uint8), cv2.COLOR_RGB2BGR)
+
+                # Add text annotation
+                text_lines = [
+                    f"Frame: {frame_count}",
+                    f"Time: {timestamp}",
+                    f"Shape: {image_np.shape}",
+                ]
+
+                y_offset = 30
+                for line in text_lines:
+                    cv2.putText(
+                        img_bgr,
+                        line,
+                        (10, y_offset),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.6,
+                        (0, 255, 0),
+                        2,
+                    )
+                    y_offset += 30
+
+                cv2.imwrite(str(filename), img_bgr)
+            else:
+                return
+
+            print(f"[Worker] 💾 Saved debug image: {filename.name}")
+
+            # Clean up old images
+            self._clean_old_images()
+
+        except Exception as e:
+            print(f"[Worker] ⚠ Failed to save debug image: {e}")
+
     def run(self, poll_interval=0.33):
         """
         Main loop: classify material at ~3 FPS.
@@ -141,6 +253,9 @@ class MaterialDetectorWorker:
                     continue
 
                 self.last_frame_count = frame_count
+
+                # Save debug image
+                self._save_debug_image(image_np, frame_count, metadata)
 
                 # Classify material
                 result = self.vlm.classify_material(image_np)
