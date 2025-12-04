@@ -307,6 +307,10 @@ def _on_keyboard_event(event, saw_object: RigidObject):
             g_oracle_mode = not g_oracle_mode
             status = "ENABLED" if g_oracle_mode else "DISABLED"
             print(f"[ORACLE] Mode {status}")
+            # Enable Penalty Mode by default if Oracle Mode is enabled
+            if g_oracle_mode:
+                g_penalty_mode = True
+                print("[PENALTY] Mode ENABLED (Auto-enabled by Oracle Mode)")
         elif event.input == carb.input.KeyboardInput.P:
             # Toggle Penalty Mode
             g_penalty_mode = not g_penalty_mode
@@ -318,6 +322,9 @@ def _on_keyboard_event(event, saw_object: RigidObject):
             status = "ENABLED" if g_vlm_mode else "DISABLED"
             print(f"[VLM] Mode {status}")
             if g_vlm_mode:
+                # Enable Penalty Mode by default if VLM Mode is enabled
+                g_penalty_mode = True
+                print("[PENALTY] Mode ENABLED (Auto-enabled by VLM Mode)")
                 print("Using vision-based material detection")
                 print(f"Current detected material: {g_detected_material}")
             else:
@@ -850,6 +857,18 @@ def main():
             # Transform force from EE frame to world/base frame
             # quat_apply rotates a vector by a quaternion
             force_ee = g_human_saw_force_cmd_ee.clone()  # [1, 3]
+
+            # --- PENALTY MODE: SAW STUCK ---
+            if g_penalty_mode:
+                # If penalty mode is on (wrong stiffness), the saw gets stuck.
+                # We disable the human force input (J/K keys).
+                # Navigation (Arrow keys) still works as it controls target_ee_pose_b directly.
+                force_ee = torch.zeros_like(force_ee)
+                if frame_count % 60 == 0:  # Print every ~0.6s
+                    print(
+                        "[PENALTY] SAW STUCK! Cannot saw with wrong stiffness. (Arrow keys still work)"
+                    )
+
             force_world = quat_apply(ee_quat_b, force_ee)  # [num_envs, 3]
 
             # Apply force to saw as external wrench
