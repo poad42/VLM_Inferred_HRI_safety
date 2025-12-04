@@ -477,18 +477,20 @@ def main():
     # ==============================================================================
     # MULTI-ZONE LOG FOR VLM MATERIAL DETECTION
     # ==============================================================================
-    # Zone 1: Soft Wood (Light tan)
+    #    # 1. Soft Wood (Left) - Soft/Compliant
     scene_cfg.log_soft = RigidObjectCfg(
         prim_path="{ENV_REGEX_NS}/LogSoft",
         spawn=sim_utils.CuboidCfg(
-            size=(0.30, 0.15, 0.15),
-            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.7, 0.5, 0.3)),
+            size=(0.20, 0.25, 0.15),
+            visual_material=sim_utils.PreviewSurfaceCfg(
+                diffuse_color=(0.0, 1.0, 0.0)
+            ),  # Green
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
                 kinematic_enabled=True, disable_gravity=False
             ),
             collision_props=sim_utils.CollisionPropertiesCfg(collision_enabled=True),
             physics_material=sim_utils.RigidBodyMaterialCfg(
-                static_friction=0.3, dynamic_friction=0.2, restitution=0.0
+                static_friction=0.5, dynamic_friction=0.4, restitution=0.0
             ),
         ),
         init_state=RigidObjectCfg.InitialStateCfg(
@@ -497,14 +499,14 @@ def main():
         ),
     )
 
-    # Zone 2: Hard Knot (Dark brown)
+    # 2. Knot (Center) - Hard/Stiff
     scene_cfg.log_knot = RigidObjectCfg(
         prim_path="{ENV_REGEX_NS}/LogKnot",
         spawn=sim_utils.CuboidCfg(
-            size=(0.20, 0.15, 0.15),
+            size=(0.20, 0.25, 0.15),
             visual_material=sim_utils.PreviewSurfaceCfg(
-                diffuse_color=(0.4, 0.25, 0.15)
-            ),
+                diffuse_color=(0.0, 0.0, 1.0)
+            ),  # Blue
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
                 kinematic_enabled=True, disable_gravity=False
             ),
@@ -519,12 +521,14 @@ def main():
         ),
     )
 
-    # Zone 3: Cracked (Medium brown)
+    # 3. Cracked (Right) - Soft/Weak
     scene_cfg.log_crack = RigidObjectCfg(
         prim_path="{ENV_REGEX_NS}/LogCrack",
         spawn=sim_utils.CuboidCfg(
-            size=(0.30, 0.15, 0.15),
-            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.6, 0.4, 0.2)),
+            size=(0.30, 0.25, 0.15),
+            visual_material=sim_utils.PreviewSurfaceCfg(
+                diffuse_color=(1.0, 0.0, 0.0)
+            ),  # Red
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
                 kinematic_enabled=True, disable_gravity=False
             ),
@@ -543,34 +547,18 @@ def main():
     add_camera_to_scene(scene_cfg)
     # --- END CAMERA ADDITION ---
 
-    # --- DEBUG: Add visual marker at camera position ---
-    scene_cfg.camera_marker = RigidObjectCfg(
-        prim_path="{ENV_REGEX_NS}/CameraMarker",
-        spawn=sim_utils.SphereCfg(
-            radius=0.05,  # 5cm sphere
-            visual_material=sim_utils.PreviewSurfaceCfg(
-                diffuse_color=(1.0, 1.0, 0.0),  # Bright yellow
-                emissive_color=(0.5, 0.5, 0.0),  # Glowing
-            ),
-            rigid_props=sim_utils.RigidBodyPropertiesCfg(
-                kinematic_enabled=True, disable_gravity=True
-            ),
-            collision_props=sim_utils.CollisionPropertiesCfg(collision_enabled=False),
-        ),
-        init_state=RigidObjectCfg.InitialStateCfg(
-            pos=(0.6, 0.0, 1.5),  # Match camera at 1.5m
-        ),
-    )
-    # --- END DEBUG MARKER ---
-
     # --- SAW TIP TRACKER: Visual marker for VLM tracking ---
     scene_cfg.saw_tip_marker = RigidObjectCfg(
         prim_path="{ENV_REGEX_NS}/SawTipMarker",
         spawn=sim_utils.SphereCfg(
-            radius=0.02,  # 2cm sphere - small but visible
+            radius=0.04,  # Reduced to 4cm as requested
             visual_material=sim_utils.PreviewSurfaceCfg(
-                diffuse_color=(0.0, 1.0, 1.0),  # Bright cyan
-                emissive_color=(0.0, 0.5, 0.5),  # Glowing cyan
+                diffuse_color=(
+                    1.0,
+                    1.0,
+                    0.0,
+                ),  # Yellow (High contrast vs Blue/Green/Red)
+                emissive_color=(0.5, 0.5, 0.0),
             ),
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
                 kinematic_enabled=True, disable_gravity=True
@@ -909,8 +897,12 @@ def main():
             saw_rotation = R.from_quat(quat_scipy)
 
             # Blade tip offset in saw's local frame
-            # Attached at center (0.0), so tip is at +0.25m (half length) - THE CUTTING END
-            blade_tip_local = torch.tensor([+0.25, 0.0, 0.0], device=saw_pos_w.device)
+            # Attached at center (0.0).
+            # Move to top spine (Y=-0.035) and forward towards tip (X=0.17)
+            # Note: Rx(-90) maps Local +Y to World -Z, so we need Local -Y for World +Z (Top)
+            blade_tip_local = torch.tensor(
+                [+0.17, -0.035, 0.0], device=saw_pos_w.device
+            )
 
             # Transform to world frame
             blade_tip_offset_world = torch.tensor(
@@ -979,13 +971,31 @@ def main():
             if g_oracle_mode or g_vlm_mode:
                 # 1. Get Material (Oracle, VLM, or Penalty)
                 if g_vlm_mode:
-                    # VLM MODE: Use vision-detected material from worker
+                    # VLM MODE: Use vision-based material detection
+
+                    # Reconnection Logic: If buffer is missing, try to connect
+                    if vlm_result_buffer is None:
+                        # Try to connect every 100 frames (~1 second)
+                        if frame_count % 100 == 0:
+                            try:
+                                vlm_result_buffer = SharedResultBuffer(
+                                    name="vlm_results",
+                                    create=False,
+                                )
+                                print(
+                                    "[SharedBuffer] ✓ Reconnected to VLM result buffer"
+                                )
+                            except FileNotFoundError:
+                                # Still not found, keep silent
+                                pass
+
                     if vlm_result_buffer is not None:
                         vlm_result = vlm_result_buffer.read_latest_json()
                         if vlm_result and vlm_result.get("material_type"):
                             zone_name = vlm_result["material_type"]
                             confidence = vlm_result.get("confidence", 0.0)
-                        # props = MATERIAL_ZONES[zone_name]
+                            # Update global for debug print
+                            g_detected_material = zone_name
                         else:
                             # Fallback if no VLM data available
                             zone_name = "soft_wood"

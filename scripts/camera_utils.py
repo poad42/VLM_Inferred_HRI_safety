@@ -13,7 +13,7 @@ def add_camera_to_scene(scene_cfg):
         prim_path="{ENV_REGEX_NS}/Camera",
         update_period=0,
         offset=CameraCfg.OffsetCfg(
-            pos=(0.6, 0.0, 1.5),  # Raised to 1.5m for wider view
+            pos=(0.6, 0.0, 2.0),  # Lowered to 2.0m for better VLM detail
             rot=(0.7071, 0.0, 0.7071, 0.0),  # 90° around Y-axis
             convention="world",
         ),

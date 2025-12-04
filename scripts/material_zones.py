@@ -10,23 +10,26 @@ Defines visual and physical properties of different wood sections.
 MATERIAL_ZONES = {
     "soft_wood": {
         "y_range": (-0.50, -0.15),  # Left section (extended to edge)
-        "color": (0.7, 0.5, 0.3),  # Light tan
-        "friction": 0.3,  # Low resistance
-        "recommended_stiffness": 500.0,  # Increased for better tracking (was 300)
+        "color": (0.0, 1.0, 0.0),  # Green
+        "friction": 0.5,
+        "stiffness": 500.0,  # Soft
+        "damping": 10.0,
+        "description": "Soft Wood (Normal)",
+        "recommended_stiffness": 500.0,
         "target_force": 10.0,  # N (Ideal cutting force)
-        "description": "Soft pine, easy cutting",
     },
     "knot": {
         "y_range": (-0.15, 0.15),  # Middle section (contiguous)
-        "color": (0.4, 0.25, 0.15),  # Dark brown
-        "friction": 0.9,  # High resistance
-        "recommended_stiffness": 700.0,  # Increased for better tracking (was 400)
+        "color": (0.0, 0.0, 1.0),  # Blue
+        "friction": 0.9,
+        "stiffness": 2000.0,  # Very Hard
+        "damping": 50.0,
+        "description": "Hard Knot",
+        "recommended_stiffness": 600.0,  # Increase stiffness to cut through
         "target_force": 40.0,  # N (Requires more force)
-        "description": "Hard knot, dense grain",
     },
     "cracked": {
         "y_range": (0.15, 0.50),  # Right section (extended to edge)
-        "color": (0.6, 0.4, 0.2),  # Medium brown with visual cracks
         "friction": 0.2,  # Very low (weak structure)
         "recommended_stiffness": 600.0,  # Increased for better tracking (was 350)
         "target_force": 5.0,  # N (Gentle handling required)

@@ -1,1 +1,2 @@
 source/VLM_Inferred_HRI_safety/VLM_Inferred_HRI_safety.egg-info/*
+scripts/__pycache__/*
