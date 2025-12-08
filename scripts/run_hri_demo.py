@@ -118,7 +118,8 @@ Z_MAX_LIMIT = 0.70  # Don't go too high (reach limit)
 # MODE TOGGLES
 g_oracle_mode = False  # Ground truth material detection (blade tip position)
 g_vlm_mode = False  # Vision-based material detection (from VLM worker)
-g_penalty_mode = False  # Wrong stiffness for testing
+g_penalty_mode = False  # Wrong stiffness for testing (inverts correct stiffness)
+g_vlm_fault_mode = False  # VLM fault injection (VLM detects wrong material)
 
 # Smooth stiffness (ramped over time)
 g_smoothed_stiffness = 500.0  # Start at soft_wood baseline
@@ -239,7 +240,7 @@ def _on_keyboard_event(event, saw_object: RigidObject):
     """Callback to apply force to the saw object and control Y/Z position"""
     global g_human_saw_force_cmd_ee, g_force_magnitude, g_downward_force_target
     global g_target_y_position, g_target_z_position, g_oracle_mode, g_penalty_mode
-    global g_vlm_mode, g_downward_force_applied, g_smoothed_stiffness, g_prev_target_y
+    global g_vlm_mode, g_vlm_fault_mode, g_downward_force_applied, g_smoothed_stiffness, g_prev_target_y
 
     # Handle Ctrl+C for clean shutdown
     import signal
@@ -316,19 +317,30 @@ def _on_keyboard_event(event, saw_object: RigidObject):
             g_penalty_mode = not g_penalty_mode
             status = "ENABLED" if g_penalty_mode else "DISABLED"
             print(f"[PENALTY] Mode {status}")
+            print("  → Inverts correct stiffness (soft→hard, hard→soft)")
+        elif event.input == carb.input.KeyboardInput.F:
+            # Toggle VLM Fault Injection Mode
+            g_vlm_fault_mode = not g_vlm_fault_mode
+            status = "ENABLED" if g_vlm_fault_mode else "DISABLED"
+            print(f"[VLM FAULT] Mode {status}")
+            if g_vlm_fault_mode:
+                print("  → VLM will detect WRONG material intentionally")
+                if not g_vlm_mode:
+                    print("  ⚠ VLM mode is OFF - enable with 'V' key first!")
+            else:
+                print("  → VLM will detect correct material")
         elif event.input == carb.input.KeyboardInput.V:
             # Toggle VLM Mode
             g_vlm_mode = not g_vlm_mode
             status = "ENABLED" if g_vlm_mode else "DISABLED"
             print(f"[VLM] Mode {status}")
             if g_vlm_mode:
-                # Enable Penalty Mode by default if VLM Mode is enabled
-                g_penalty_mode = True
-                print("[PENALTY] Mode ENABLED (Auto-enabled by VLM Mode)")
                 print("Using vision-based material detection")
                 print(f"Current detected material: {g_detected_material}")
+                if g_penalty_mode:
+                    print("[PENALTY] Mode is ACTIVE - stiffness will be inverted!")
             else:
-                print("Switched back to Oracle/manual control")
+                print("Switched back to Oracle mode (geometric position)")
         # --- REMOVED 'T' KEY ---
 
     elif event.type == carb.input.KeyboardEventType.KEY_RELEASE:
@@ -392,7 +404,7 @@ def update_states(robot: Articulation, ee_frame_idx: int, arm_joint_ids: list[in
 def main():
     # Global variables
     global g_target_y_position, g_target_z_position, g_force_magnitude
-    global g_oracle_mode, g_penalty_mode, g_vlm_mode, g_detected_material
+    global g_oracle_mode, g_penalty_mode, g_vlm_mode, g_vlm_fault_mode, g_detected_material
     global g_debug_mode, g_downward_force_applied, g_smoothed_stiffness
     global g_prev_target_y
 
@@ -1013,6 +1025,22 @@ def main():
                         if vlm_result and vlm_result.get("material_type"):
                             zone_name = vlm_result["material_type"]
                             confidence = vlm_result.get("confidence", 0.0)
+
+                            # VLM FAULT INJECTION: Intentionally detect wrong material
+                            if g_vlm_fault_mode:
+                                # Map to wrong material
+                                fault_map = {
+                                    "soft_wood": "knot",
+                                    "knot": "cracked",
+                                    "cracked": "soft_wood",
+                                }
+                                original_zone = zone_name
+                                zone_name = fault_map.get(zone_name, "soft_wood")
+                                if frame_count % 60 == 0:  # Print less frequently
+                                    print(
+                                        f"[VLM FAULT] Injected wrong detection: {original_zone} → {zone_name}"
+                                    )
+
                             # Update global for debug print
                             g_detected_material = zone_name
                         else:
@@ -1109,12 +1137,18 @@ def main():
 
                 # Debug Print
                 if frame_count % 30 == 0:
+                    # Determine mode string (priority: what's controlling material detection)
                     if g_vlm_mode:
                         mode_str = "VLM"
-                    elif g_penalty_mode:
-                        mode_str = "PENALTY"
                     else:
                         mode_str = "ORACLE"
+
+                    # Add fault/penalty indicators if active
+                    if g_vlm_fault_mode and g_vlm_mode:
+                        mode_str += "+FAULT"
+                    if g_penalty_mode:
+                        mode_str += "+PENALTY"
+
                     print(
                         f"[{mode_str}] Zone: {zone_name.upper()} | Force: {current_human_force:.1f}/{target_force_limit:.1f}N | Target K: {target_stiffness:.0f} | Actual K: {g_smoothed_stiffness:.0f}"
                     )
