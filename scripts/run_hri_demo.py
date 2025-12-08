@@ -505,7 +505,7 @@ def main():
                 diffuse_color=(0.0, 1.0, 0.0)
             ),  # Green
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
-                kinematic_enabled=True, disable_gravity=False
+                kinematic_enabled=False, disable_gravity=False
             ),
             collision_props=sim_utils.CollisionPropertiesCfg(collision_enabled=True),
             physics_material=sim_utils.RigidBodyMaterialCfg(
@@ -527,7 +527,7 @@ def main():
                 diffuse_color=(0.0, 0.0, 1.0)
             ),  # Blue
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
-                kinematic_enabled=True, disable_gravity=False
+                kinematic_enabled=False, disable_gravity=False
             ),
             collision_props=sim_utils.CollisionPropertiesCfg(collision_enabled=True),
             physics_material=sim_utils.RigidBodyMaterialCfg(
@@ -549,7 +549,7 @@ def main():
                 diffuse_color=(1.0, 0.0, 0.0)
             ),  # Red
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
-                kinematic_enabled=True, disable_gravity=False
+                kinematic_enabled=False, disable_gravity=False
             ),
             collision_props=sim_utils.CollisionPropertiesCfg(collision_enabled=True),
             physics_material=sim_utils.RigidBodyMaterialCfg(
