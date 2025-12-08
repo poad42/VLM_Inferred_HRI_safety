@@ -471,11 +471,15 @@ def main():
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
                 kinematic_enabled=False,  # Dynamic to allow movement and force application
                 disable_gravity=True,
-                max_depenetration_velocity=0.1,  # Prevent explosive ejection
-                solver_position_iteration_count=16,  # Increased for lighter object (was 12)
-                solver_velocity_iteration_count=6,  # Increased for lighter object (was 4)
+                max_depenetration_velocity=1.0,  # Increased to push out of penetration
+                solver_position_iteration_count=64,  # Much higher for contact with heavy logs
+                solver_velocity_iteration_count=16,  # Much higher for stable contact
             ),
-            collision_props=sim_utils.CollisionPropertiesCfg(collision_enabled=True),
+            collision_props=sim_utils.CollisionPropertiesCfg(
+                collision_enabled=True,
+                contact_offset=0.02,  # How close before contact starts (2cm)
+                rest_offset=0.0,  # Contact surface distance
+            ),
             # PHYSICS FIX 2: Material properties for stable contact
             physics_material=sim_utils.RigidBodyMaterialCfg(
                 static_friction=0.8,  # High friction to bite into wood
