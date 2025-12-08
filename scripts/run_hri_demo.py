@@ -308,10 +308,9 @@ def _on_keyboard_event(event, saw_object: RigidObject):
             g_oracle_mode = not g_oracle_mode
             status = "ENABLED" if g_oracle_mode else "DISABLED"
             print(f"[ORACLE] Mode {status}")
-            # Enable Penalty Mode by default if Oracle Mode is enabled
-            if g_oracle_mode:
-                g_penalty_mode = True
-                print("[PENALTY] Mode ENABLED (Auto-enabled by Oracle Mode)")
+            if g_penalty_mode:
+                print(f"  [PENALTY] is currently ACTIVE - force (J/K) is disabled!")
+                print(f"  Press 'P' to disable penalty mode if you want force control")
         elif event.input == carb.input.KeyboardInput.P:
             # Toggle Penalty Mode
             g_penalty_mode = not g_penalty_mode
@@ -511,8 +510,8 @@ def main():
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
                 kinematic_enabled=False,  # Dynamic for proper collision
                 disable_gravity=True,  # Disable gravity so it doesn't fall
-                linear_damping=999.0,  # Extreme damping to resist movement
-                angular_damping=999.0,
+                linear_damping=0.5,  # Low damping - allows saw forces to work
+                angular_damping=0.5,
             ),
             mass_props=sim_utils.MassPropertiesCfg(
                 mass=1000.0
@@ -539,8 +538,8 @@ def main():
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
                 kinematic_enabled=False,  # Dynamic for proper collision
                 disable_gravity=True,  # Disable gravity so it doesn't fall
-                linear_damping=999.0,  # Extreme damping to resist movement
-                angular_damping=999.0,
+                linear_damping=0.5,        # Low damping - allows saw forces to work
+                angular_damping=0.5,
             ),
             mass_props=sim_utils.MassPropertiesCfg(
                 mass=1000.0
@@ -567,8 +566,8 @@ def main():
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
                 kinematic_enabled=False,  # Dynamic for proper collision
                 disable_gravity=True,  # Disable gravity so it doesn't fall
-                linear_damping=999.0,  # Extreme damping to resist movement
-                angular_damping=999.0,
+                linear_damping=0.5,        # Low damping - allows saw forces to work
+                angular_damping=0.5,
             ),
             mass_props=sim_utils.MassPropertiesCfg(
                 mass=1000.0
