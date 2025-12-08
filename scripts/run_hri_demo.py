@@ -505,8 +505,14 @@ def main():
                 diffuse_color=(0.0, 1.0, 0.0)
             ),  # Green
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
-                kinematic_enabled=False, disable_gravity=False
+                kinematic_enabled=False,  # Dynamic for proper collision
+                disable_gravity=True,  # Disable gravity so it doesn't fall
+                linear_damping=999.0,  # Extreme damping to resist movement
+                angular_damping=999.0,
             ),
+            mass_props=sim_utils.MassPropertiesCfg(
+                mass=1000.0
+            ),  # Very heavy - resists being pushed
             collision_props=sim_utils.CollisionPropertiesCfg(collision_enabled=True),
             physics_material=sim_utils.RigidBodyMaterialCfg(
                 static_friction=0.5, dynamic_friction=0.4, restitution=0.0
@@ -527,8 +533,14 @@ def main():
                 diffuse_color=(0.0, 0.0, 1.0)
             ),  # Blue
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
-                kinematic_enabled=False, disable_gravity=False
+                kinematic_enabled=False,  # Dynamic for proper collision
+                disable_gravity=True,  # Disable gravity so it doesn't fall
+                linear_damping=999.0,  # Extreme damping to resist movement
+                angular_damping=999.0,
             ),
+            mass_props=sim_utils.MassPropertiesCfg(
+                mass=1000.0
+            ),  # Very heavy - resists being pushed
             collision_props=sim_utils.CollisionPropertiesCfg(collision_enabled=True),
             physics_material=sim_utils.RigidBodyMaterialCfg(
                 static_friction=0.9, dynamic_friction=0.7, restitution=0.0
@@ -549,8 +561,14 @@ def main():
                 diffuse_color=(1.0, 0.0, 0.0)
             ),  # Red
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
-                kinematic_enabled=False, disable_gravity=False
+                kinematic_enabled=False,  # Dynamic for proper collision
+                disable_gravity=True,  # Disable gravity so it doesn't fall
+                linear_damping=999.0,  # Extreme damping to resist movement
+                angular_damping=999.0,
             ),
+            mass_props=sim_utils.MassPropertiesCfg(
+                mass=1000.0
+            ),  # Very heavy - resists being pushed
             collision_props=sim_utils.CollisionPropertiesCfg(collision_enabled=True),
             physics_material=sim_utils.RigidBodyMaterialCfg(
                 static_friction=0.2, dynamic_friction=0.1, restitution=0.0
